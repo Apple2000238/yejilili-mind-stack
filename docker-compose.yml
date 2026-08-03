@@ -1,0 +1,256 @@
+version: "3.9"
+
+# ─── 命名卷 ───────────────────────────────────────────────────────────────────
+volumes:
+  ledger-data:
+  nocturne-data:
+  xinchao-data:
+  adapter-audit:
+  staging-artifacts:
+
+# ─── 网络 ─────────────────────────────────────────────────────────────────────
+networks:
+  public:
+    driver: bridge
+  mind:
+    driver: bridge
+    internal: false
+  nocturne-private:
+    driver: bridge
+    internal: true
+
+# ─── Secret ───────────────────────────────────────────────────────────────────
+secrets:
+  mcp_adapter_token:
+    file: ./secrets/mcp_adapter_token.txt
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  provider_api_key:
+    file: ./secrets/provider_api_key.txt
+
+services:
+  # ─── Continuity Ledger ──────────────────────────────────────────────────────
+  continuity-ledger:
+    image: postgres:16-alpine@sha256:TO_BE_LOCKED
+    container_name: yjll-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: continuity_ledger
+      POSTGRES_USER: continuity
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - ledger-data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    networks:
+      - mind
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U continuity -d continuity_ledger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
+  # ─── Nocturne（上游固定快照，只读挂载源码）────────────────────────────────────
+  nocturne:
+    build:
+      context: ./upstream/nocturne-memory-core
+      dockerfile: Dockerfile
+    container_name: yjll-nocturne
+    restart: unless-stopped
+    environment:
+      OMBRE_PORT: "8000"
+      OMBRE_TRANSPORT: streamable-http
+    volumes:
+      - nocturne-data:/data/buckets
+      - ./upstream/nocturne-memory-core:/app:ro
+    networks:
+      - nocturne-private
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: "1.0"
+    # 不声明 ports，不加入 public 网络
+
+  # ─── Nocturne Adapter（兼容适配层）────────────────────────────────────────────
+  nocturne-adapter:
+    build:
+      context: ./services/nocturne-adapter
+      dockerfile: Dockerfile
+    container_name: yjll-adapter
+    restart: unless-stopped
+    environment:
+      ADAPTER_PORT: "8001"
+      ADAPTER_HOST: "0.0.0.0"
+      NOCTURNE_URL: "http://nocturne:8000"
+      MCP_ADAPTER_TOKEN_FILE: /run/secrets/mcp_adapter_token
+      POSTGRES_HOST: continuity-ledger
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: continuity_ledger
+      POSTGRES_USER: continuity
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      LOG_LEVEL: INFO
+    secrets:
+      - mcp_adapter_token
+      - postgres_password
+    volumes:
+      - adapter-audit:/var/log/adapter
+    networks:
+      - mind
+      - nocturne-private
+    depends_on:
+      nocturne:
+        condition: service_healthy
+      continuity-ledger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
+  # ─── Edge Gateway ───────────────────────────────────────────────────────────
+  edge-gateway:
+    build:
+      context: ./services/edge-gateway
+      dockerfile: Dockerfile
+    container_name: yjll-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      GATEWAY_PORT: "8080"
+      GATEWAY_HOST: "0.0.0.0"
+      ADAPTER_URL: "http://nocturne-adapter:8001"
+      PROVIDER_TYPE: ${PROVIDER_TYPE:-mock}
+      PROVIDER_BASE_URL: ${PROVIDER_BASE_URL:-http://mock-provider:8081}
+      PROVIDER_MODEL: ${PROVIDER_MODEL:-mock-model}
+      PROVIDER_TIMEOUT_SECONDS: "60"
+      PROVIDER_MAX_RETRIES: "3"
+      PROVIDER_API_KEY_FILE: /run/secrets/provider_api_key
+      POSTGRES_HOST: continuity-ledger
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: continuity_ledger
+      POSTGRES_USER: continuity
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    secrets:
+      - provider_api_key
+      - postgres_password
+    networks:
+      - public
+      - mind
+    depends_on:
+      nocturne-adapter:
+        condition: service_healthy
+      continuity-ledger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
+  # ─── XinChao（上游固定快照）───────────────────────────────────────────────────
+  xinchao:
+    build:
+      context: ./upstream/xinchao-dynamic-mind
+      dockerfile: Dockerfile
+    container_name: yjll-xinchao
+    restart: unless-stopped
+    environment:
+      XINCHAO_PORT: "3000"
+      OMBRE_MCP_URL: "http://nocturne-adapter:8001/mcp"
+      XINCHAO_OMBRE_TOKEN_FILE: /run/secrets/mcp_adapter_token
+    secrets:
+      - mcp_adapter_token
+    volumes:
+      - xinchao-data:/data/state
+      - ./upstream/xinchao-dynamic-mind:/app:ro
+    networks:
+      - mind
+    depends_on:
+      nocturne-adapter:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (r)=>process.exit(r.statusCode===200?0:1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
+  # ─── Migration CLI（仅人工执行 profile）────────────────────────────────────────
+  migration-cli:
+    build:
+      context: ./services/migration-cli
+      dockerfile: Dockerfile
+    container_name: yjll-migration-cli
+    profiles: [migration]
+    environment:
+      POSTGRES_HOST: continuity-ledger
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: continuity_ledger
+      POSTGRES_USER: continuity
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - staging-artifacts:/artifacts
+    networks:
+      - mind
+    depends_on:
+      continuity-ledger:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
+  # ─── Acceptance Runner（仅人工执行 profile）───────────────────────────────────
+  acceptance-runner:
+    build:
+      context: ./services/acceptance-runner
+      dockerfile: Dockerfile
+    container_name: yjll-acceptance
+    profiles: [acceptance]
+    environment:
+      GATEWAY_URL: "http://edge-gateway:8080"
+      ADAPTER_URL: "http://nocturne-adapter:8001"
+    networks:
+      - mind
+    depends_on:
+      edge-gateway:
+        condition: service_healthy
+      nocturne-adapter:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"

@@ -1,0 +1,2 @@
+# Placeholder for Docker Secret: LLM Provider API Key
+# Replace with actual staging provider key when ready

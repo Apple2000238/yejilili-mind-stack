@@ -1,0 +1,3 @@
+# Placeholder for Docker Secret: MCP Adapter Bearer Token
+# Replace with a strong random string (≥32 chars)
+# Example: openssl rand -hex 32
