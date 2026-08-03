@@ -3,11 +3,17 @@
 错误处理：
 - ValueError（参数校验失败）→ JSON-RPC error -32602（Invalid params）
 - 其他 Exception → JSON-RPC error -32603（Internal error）
+
+初始化策略：
+- 外部依赖（NocturneClient、ProvenanceStore）在 FastAPI lifespan 中创建，
+  避免模块导入时触发网络/数据库连接，提升可测试性。
 """
 
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -29,21 +35,46 @@ logger = logging.getLogger("adapter.main")
 config = load_config()
 logger.setLevel(getattr(logging, config.log_level.upper(), logging.INFO))
 
-# ─── 初始化组件 ────────────────────────────────────────────────────────────────
-nocturne_client = NocturneClient(config.nocturne_url)
+# ─── 模块级组件引用（由 lifespan 初始化）─────────────────────────────────────────
+nocturne_client: NocturneClient | None = None
+provenance_store: ProvenanceStore | None = None
+bridge: MCPBridge | None = None
 
-DSN = f"postgresql://{config.postgres_user}:{config.postgres_password}@{config.postgres_host}:{config.postgres_port}/{config.postgres_db}"
-provenance_store = ProvenanceStore(DSN)
 
-bridge = MCPBridge(config, nocturne_client, provenance_store)
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """
+    FastAPI lifespan：启动时初始化外部依赖，关闭时清理。
+    """
+    global nocturne_client, provenance_store, bridge
+
+    logger.info("adapter lifespan: initializing components")
+
+    # 初始化 Nocturne 客户端
+    nocturne_client = NocturneClient(config.nocturne_url)
+
+    # 初始化 Provenance 账本
+    dsn = (
+        f"postgresql://{config.postgres_user}:{config.postgres_password}"
+        f"@{config.postgres_host}:{config.postgres_port}/{config.postgres_db}"
+    )
+    provenance_store = ProvenanceStore(dsn)
+
+    # 初始化 MCP 桥接
+    bridge = MCPBridge(config, nocturne_client, provenance_store)
+
+    logger.info("adapter lifespan: ready")
+    yield
+
+    # 关闭
+    logger.info("adapter lifespan: shutting down")
+    if nocturne_client is not None:
+        await nocturne_client.close()
+    logger.info("adapter lifespan: shutdown complete")
+
 
 # ─── FastAPI 应用 ──────────────────────────────────────────────────────────────
-app = FastAPI(title="Nocturne Adapter", version="1.0.0")
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    await nocturne_client.close()
+app = FastAPI(title="Nocturne Adapter", version="1.0.0", lifespan=_lifespan)
 
 
 # ─── 健康检查（含上游和账本验证）────────────────────────────────────────────────
@@ -58,19 +89,27 @@ async def health() -> JSONResponse:
     status_code = 200
 
     # 检查上游 Nocturne
-    try:
-        await nocturne_client.initialize()
-        checks["nocturne"] = {"status": "ok", "url": config.nocturne_url}
-    except Exception as e:
-        checks["nocturne"] = {"status": "error", "detail": str(e)[:200]}
+    if nocturne_client is not None:
+        try:
+            await nocturne_client.initialize()
+            checks["nocturne"] = {"status": "ok", "url": config.nocturne_url}
+        except Exception as e:
+            checks["nocturne"] = {"status": "error", "detail": str(e)[:200]}
+            status_code = 503
+    else:
+        checks["nocturne"] = {"status": "error", "detail": "not initialized"}
         status_code = 503
 
     # 检查 Postgres
-    try:
-        provenance_store.ping()
-        checks["continuity_ledger"] = {"status": "ok"}
-    except Exception as e:
-        checks["continuity_ledger"] = {"status": "error", "detail": str(e)[:200]}
+    if provenance_store is not None:
+        try:
+            provenance_store.ping()
+            checks["continuity_ledger"] = {"status": "ok"}
+        except Exception as e:
+            checks["continuity_ledger"] = {"status": "error", "detail": str(e)[:200]}
+            status_code = 503
+    else:
+        checks["continuity_ledger"] = {"status": "error", "detail": "not initialized"}
         status_code = 503
 
     overall = "ok" if status_code == 200 else "degraded"
@@ -162,6 +201,9 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
 
     # ── tools/call ───────────────────────────────────────────────────────────
     if method == "tools/call":
+        if bridge is None:
+            return _error(req_id, -32603, "Adapter not initialized")
+
         tool_name = params.get("name", "")
         args: dict = params.get("arguments", {})
 
