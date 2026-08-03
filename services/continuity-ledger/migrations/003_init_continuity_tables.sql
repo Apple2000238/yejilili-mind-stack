@@ -1,5 +1,14 @@
 -- 003_init_continuity_tables.sql
 -- 连续性核心表：身份、驱动、心情、过渡、交接
+-- 注：向量字段使用 JSONB 存储，如需 pgvector 扩展可在独立迁移中升级
+
+-- ── pgvector 扩展（可选，如镜像支持）───────────────────────────────
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION WHEN undefined_file THEN
+    -- pgvector 扩展不可用，向量字段将回退到 JSONB
+END $$;
 
 -- ── 身份连续性锚点 ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS identity_anchor (
@@ -10,7 +19,8 @@ CREATE TABLE IF NOT EXISTS identity_anchor (
         -- xinchao | nocturne | edge-gateway
     content TEXT NOT NULL,
     content_hash TEXT NOT NULL,
-    vector_embedding VECTOR(1536),  -- 若启用 pgvector
+    vector_embedding JSONB,
+        -- 存储为 JSONB 数组 [float, ...]；如需 pgvector 可后续 ALTER COLUMN 为 VECTOR(1536)
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_confirmed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     confidence REAL NOT NULL DEFAULT 1.0,
