@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "project": "yejilili-mind-stack",
+  "generated_at": "2026-08-03T22:20:00+08:00",
+  "fixed_upstreams": [
+    {
+      "name": "Nocturne Memory Core",
+      "repository_url": "https://github.com/Pyruslili/Nocturne-Memory-Core",
+      "commit": "8fecd3bbce9025bf05e2c6ef2311dfe4341ef38b",
+      "archive_path": "upstream/nocturne-memory-core/",
+      "license": "MIT",
+      "license_file": "upstream/nocturne-memory-core/LICENSE",
+      "notice_file": "upstream/nocturne-memory-core/NOTICE",
+      "import_date": "2026-08-03",
+      "notes": "Ombre Brain 的进化版。保留原始 LICENSE 与 NOTICE（含 Ombre Brain 来源说明）。本仓库仅以只读 vendor 形式引用，不修改源码。"
+    },
+    {
+      "name": "XinChao Dynamic Mind",
+      "repository_url": "https://github.com/Apple2000238/xinchao-dynamic-mind",
+      "commit": "9c36803629a98b95a4ec73c58809809800e10e6b",
+      "archive_path": "upstream/xinchao-dynamic-mind/",
+      "license": "MIT",
+      "license_file": "upstream/xinchao-dynamic-mind/LICENSE",
+      "import_date": "2026-08-03",
+      "notes": "动态心理状态引擎。保留原始 LICENSE。本仓库仅以只读 vendor 形式引用，不修改源码。"
+    }
+  ],
+  "dependency_locking": {
+    "python_version": "3.12",
+    "node_version": "22",
+    "lock_files": [
+      "services/edge-gateway/requirements.lock",
+      "services/nocturne-adapter/requirements.lock",
+      "services/migration-cli/requirements.lock",
+      "services/acceptance-runner/package-lock.json"
+    ],
+    "image_digests": "docker-compose.yml 中每个镜像均使用锁定 digest"
+  }
+}
