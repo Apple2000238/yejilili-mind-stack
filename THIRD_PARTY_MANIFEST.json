@@ -36,6 +36,10 @@
       "services/migration-cli/requirements.txt",
       "services/acceptance-runner/requirements.txt"
     ],
-    "image_digests": "docker-compose.yml 中 postgres 镜像 digest 待锁定（当前为 TO_BE_LOCKED）"
+    "image_digests": {
+      "postgres:16-alpine": "sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
+      "verified_at": "2026-08-04",
+      "source": "Docker Hub security scan (baseimage.io, 2026-06-10)"
+    }
   }
 }
