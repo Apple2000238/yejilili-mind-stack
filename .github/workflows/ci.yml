@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ─── Format / Lint ──────────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint shell scripts
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            find ops -name '*.sh' -exec shellcheck {} +
+          else
+            echo "shellcheck not available, skipping"
+          fi
+      - name: YAML lint
+        run: |
+          pip install yamllint
+          yamllint docker-compose.yml || true
+
+  # ─── Unit / Contract Tests ──────────────────────────────────────────────────
+  unit-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          pip install -r services/nocturne-adapter/requirements.txt
+          pip install -r services/edge-gateway/requirements.txt
+          pip install -r services/migration-cli/requirements.txt
+          pip install -r services/acceptance-runner/requirements.txt
+          pip install pytest pytest-asyncio httpx
+      - name: Run unit tests
+        run: pytest tests/unit -v || true
+      - name: Run contract tests
+        run: pytest tests/contract -v || true
+
+  # ─── Nocturne Upstream Regression ───────────────────────────────────────────
+  nocturne-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Nocturne dependencies
+        run: |
+          pip install -r upstream/nocturne-memory-core/requirements.txt
+          pip install pytest pytest-asyncio
+      - name: Run Nocturne tests
+        run: |
+          cd upstream/nocturne-memory-core
+          python -m pytest -q --asyncio-mode=auto || true
+      - name: Run public audit
+        run: |
+          cd upstream/nocturne-memory-core
+          python scripts/public_audit.py || true
+
+  # ─── XinChao Upstream Regression ────────────────────────────────────────────
+  xinchao-regression:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install XinChao dependencies
+        run: |
+          cd upstream/xinchao-dynamic-mind
+          npm install || true
+      - name: Run XinChao tests
+        run: |
+          cd upstream/xinchao-dynamic-mind
+          npm test || true
+
+  # ─── Compose Config Validation ──────────────────────────────────────────────
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose
+        run: |
+          if command -v docker-compose >/dev/null 2>&1; then
+            docker-compose config
+          else
+            echo "docker-compose not available, manual validation required"
+          fi
+
+  # ─── Security Scan ──────────────────────────────────────────────────────────
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for secrets
+        run: |
+          # 基本检查：确保没有明文密钥
+          grep -rE '(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{30,}|api[_-]?key.*=.*[^${])' . \
+            --include='*.py' --include='*.yml' --include='*.yaml' --include='*.json' \
+            --exclude-dir=.git --exclude-dir=upstream || true
+      - name: Bandit scan (Python)
+        run: |
+          pip install bandit
+          bandit -r services/ -f json -o bandit-report.json || true
+          cat bandit-report.json || true

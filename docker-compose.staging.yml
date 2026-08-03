@@ -1,0 +1,23 @@
+version: "3.9"
+# docker-compose.staging.yml — Staging 环境覆盖
+# 用法: docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+
+services:
+  edge-gateway:
+    ports:
+      - "8080:8002"
+    environment:
+      LOG_LEVEL: DEBUG
+
+  continuity-ledger:
+    environment:
+      POSTGRES_DB: continuity_ledger_staging
+
+  migration-cli:
+    volumes:
+      - ./staging-artifacts:/artifacts
+
+  acceptance-runner:
+    environment:
+      GATEWAY_URL: "http://edge-gateway:8002"
+      ADAPTER_URL: "http://nocturne-adapter:8001"
