@@ -1,10 +1,15 @@
-"""FastAPI 主入口：MCP streamable HTTP 服务 + 健康检查。"""
+"""FastAPI 主入口：MCP streamable HTTP 服务 + 健康检查。
+
+错误处理：
+- ValueError（参数校验失败）→ JSON-RPC error -32602（Invalid params）
+- 其他 Exception → JSON-RPC error -32603（Internal error）
+"""
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .auth import require_auth
@@ -41,10 +46,43 @@ async def _shutdown() -> None:
     await nocturne_client.close()
 
 
-# ─── 健康检查 ──────────────────────────────────────────────────────────────────
+# ─── 健康检查（含上游和账本验证）────────────────────────────────────────────────
 @app.get("/health")
-async def health() -> dict:
-    return {"status": "ok", "service": "nocturne-adapter", "upstream_commit": config.upstream_commit}
+async def health() -> JSONResponse:
+    """
+    健康检查：验证自身、上游 Nocturne 和 Postgres 账本。
+    """
+    checks: dict[str, dict] = {
+        "adapter": {"status": "ok"},
+    }
+    status_code = 200
+
+    # 检查上游 Nocturne
+    try:
+        await nocturne_client.initialize()
+        checks["nocturne"] = {"status": "ok", "url": config.nocturne_url}
+    except Exception as e:
+        checks["nocturne"] = {"status": "error", "detail": str(e)[:200]}
+        status_code = 503
+
+    # 检查 Postgres
+    try:
+        provenance_store.ping()
+        checks["continuity_ledger"] = {"status": "ok"}
+    except Exception as e:
+        checks["continuity_ledger"] = {"status": "error", "detail": str(e)[:200]}
+        status_code = 503
+
+    overall = "ok" if status_code == 200 else "degraded"
+    return JSONResponse(
+        {
+            "status": overall,
+            "service": "nocturne-adapter",
+            "upstream_commit": config.upstream_commit,
+            "checks": checks,
+        },
+        status_code=status_code,
+    )
 
 
 # ─── MCP Streamable HTTP 入口 ──────────────────────────────────────────────────
@@ -54,7 +92,6 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
     MCP streamable HTTP 入口。
     支持 initialize、tools/list、tools/call。
     """
-    # 鉴权
     caller = require_auth(request, config.mcp_adapter_token)
 
     body = await request.json()
@@ -66,14 +103,10 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
 
     # ── initialize ───────────────────────────────────────────────────────────
     if method == "initialize":
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "serverInfo": {"name": "nocturne-adapter", "version": "1.0.0"},
-            },
+        return _success(req_id, {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "serverInfo": {"name": "nocturne-adapter", "version": "1.0.0"},
         })
 
     # ── notifications/initialized ────────────────────────────────────────────
@@ -82,94 +115,130 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
 
     # ── tools/list ───────────────────────────────────────────────────────────
     if method == "tools/list":
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "breath",
-                        "description": "浮现未解决记忆或按关键词检索",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "搜索关键词（可选）"},
-                                "max_results": {"type": "integer", "default": 12, "maximum": 20},
-                                "max_tokens": {"type": "integer", "default": 2200, "maximum": 4000},
+        return _success(req_id, {
+            "tools": [
+                {
+                    "name": "breath",
+                    "description": "浮现未解决记忆或按关键词检索",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "搜索关键词（可选）"},
+                            "max_results": {"type": "integer", "minimum": 1, "maximum": 20},
+                            "max_tokens": {"type": "integer", "minimum": 100, "maximum": 4000},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "hold",
+                    "description": "存储记忆/感受/写作/悬置/窗口",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "tags": {"type": "string", "default": ""},
+                            "importance": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                            "auto": {"type": "boolean", "description": "是否为自动写入"},
+                            "source": {
+                                "type": "string",
+                                "description": "来源标识",
+                                "enum": [
+                                    "xinchao-dream",
+                                    "xinchao-handoff",
+                                    "xinchao-thought",
+                                    "xinchao-heartbeat",
+                                    "edge-gateway",
+                                    "migration-cli",
+                                ],
                             },
                         },
+                        "required": ["content"],
+                        "additionalProperties": False,
                     },
-                    {
-                        "name": "hold",
-                        "description": "存储记忆/感受/写作/悬置/窗口",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "content": {"type": "string"},
-                                "tags": {"type": "string", "default": ""},
-                                "importance": {"type": "integer", "default": 5},
-                                "auto": {"type": "boolean", "description": "是否为自动写入"},
-                                "source": {"type": "string", "description": "来源标识，如 xinchao-dream", "maxLength": 64},
-                            },
-                            "required": ["content"],
-                        },
-                    },
-                ],
-            },
+                },
+            ],
         })
 
     # ── tools/call ───────────────────────────────────────────────────────────
     if method == "tools/call":
         tool_name = params.get("name", "")
-        args = params.get("arguments", {})
+        args: dict = params.get("arguments", {})
 
-        try:
-            if tool_name == "breath":
+        # 未知字段拒绝：根据工具 schema 检查
+        if tool_name == "breath":
+            allowed = {"query", "max_results", "max_tokens"}
+            unknown = set(args.keys()) - allowed
+            if unknown:
+                return _error(req_id, -32602, f"Unknown fields for breath: {', '.join(sorted(unknown))}")
+
+            try:
                 result = await bridge.handle_breath(
                     caller=caller,
                     query=args.get("query"),
                     max_results=args.get("max_results"),
                     max_tokens=args.get("max_tokens"),
                 )
-                return JSONResponse({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "content": result["content"],
-                        "metadata": result.get("metadata", {}),
-                    },
+                return _success(req_id, {
+                    "content": result["content"],
+                    "metadata": result.get("metadata", {}),
                 })
+            except ValueError as e:
+                logger.warning("validation error: %s", e)
+                return _error(req_id, -32602, str(e))
+            except Exception as e:
+                logger.error("tool call failed: %s", e, exc_info=True)
+                return _error(req_id, -32603, "Internal adapter error")
 
-            elif tool_name == "hold":
+        elif tool_name == "hold":
+            allowed = {"content", "tags", "importance", "auto", "source"}
+            unknown = set(args.keys()) - allowed
+            if unknown:
+                return _error(req_id, -32602, f"Unknown fields for hold: {', '.join(sorted(unknown))}")
+
+            try:
                 result = await bridge.handle_hold(
                     caller=caller,
-                    content=args.get("content", ""),
-                    tags=args.get("tags", ""),
-                    importance=args.get("importance", 5),
+                    content=args.get("content"),
+                    tags=args.get("tags"),
+                    importance=args.get("importance"),
                     auto=args.get("auto"),
                     source=args.get("source"),
                 )
-                return JSONResponse({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "content": result["content"],
-                        "metadata": result.get("metadata", {}),
-                    },
+                return _success(req_id, {
+                    "content": result["content"],
+                    "metadata": result.get("metadata", {}),
                 })
+            except ValueError as e:
+                logger.warning("validation error: %s", e)
+                return _error(req_id, -32602, str(e))
+            except Exception as e:
+                logger.error("tool call failed: %s", e, exc_info=True)
+                return _error(req_id, -32603, "Internal adapter error")
 
-            else:
-                raise HTTPException(status_code=400, detail=f"Unknown tool: {tool_name}")
-
-        except ValueError as e:
-            logger.warning("validation error: %s", e)
-            raise HTTPException(status_code=422, detail=str(e))
-        except Exception as e:
-            logger.error("tool call failed: %s", e, exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal adapter error")
+        else:
+            return _error(req_id, -32601, f"Unknown tool: {tool_name}")
 
     # ── 未知方法 ─────────────────────────────────────────────────────────────
-    raise HTTPException(status_code=400, detail=f"Unknown method: {method}")
+    return _error(req_id, -32601, f"Unknown method: {method}")
+
+
+# ─── JSON-RPC 辅助函数 ─────────────────────────────────────────────────────────
+
+def _success(req_id: Any, result: dict) -> JSONResponse:
+    return JSONResponse({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": result,
+    })
+
+
+def _error(req_id: Any, code: int, message: str) -> JSONResponse:
+    return JSONResponse({
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": code, "message": message},
+    })
 
 
 # ─── 主入口 ────────────────────────────────────────────────────────────────────

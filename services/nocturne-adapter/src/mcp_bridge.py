@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 from .auth import Caller
@@ -19,11 +20,108 @@ from .provenance import ProvenanceStore
 
 logger = logging.getLogger("adapter.mcp_bridge")
 
+# ─── 允许值白名单 ─────────────────────────────────────────────────────────────
+SOURCE_ALLOWLIST: set[str] = {
+    "xinchao-dream",
+    "xinchao-handoff",
+    "xinchao-thought",
+    "xinchao-heartbeat",
+    "edge-gateway",
+    "migration-cli",
+}
 
-def _clamp(value: int, min_val: int, max_val: int, default: int) -> int:
-    if value is None or not isinstance(value, int):
-        return default
-    return max(min_val, min(max_val, value))
+
+# ─── 严格参数校验 ─────────────────────────────────────────────────────────────
+
+def _validate_breath(
+    query: Any,
+    max_results: Any,
+    max_tokens: Any,
+    config: Config,
+) -> tuple[str, int, int]:
+    """
+    严格校验 breath 参数。
+    超限参数返回 ValueError（不静默 clamp）。
+    """
+    query_str = (query or "").strip() if isinstance(query, str) else ""
+
+    if max_results is not None:
+        if not isinstance(max_results, int) or isinstance(max_results, bool):
+            raise ValueError("max_results must be an integer")
+        if max_results < 1 or max_results > config.breath_max_results_limit:
+            raise ValueError(
+                f"max_results must be between 1 and {config.breath_max_results_limit}, "
+                f"got {max_results}"
+            )
+    else:
+        max_results = config.breath_default_max_results
+
+    if max_tokens is not None:
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
+            raise ValueError("max_tokens must be an integer")
+        if max_tokens < 100 or max_tokens > config.breath_max_tokens_limit:
+            raise ValueError(
+                f"max_tokens must be between 100 and {config.breath_max_tokens_limit}, "
+                f"got {max_tokens}"
+            )
+    else:
+        max_tokens = config.breath_default_max_tokens
+
+    return query_str, max_results, max_tokens
+
+
+def _validate_hold(
+    content: Any,
+    tags: Any,
+    importance: Any,
+    auto: Any,
+    source: Any,
+) -> tuple[str, str, int, bool | None, str]:
+    """
+    严格校验 hold 参数。
+    - content: 必填，非空字符串
+    - importance: 1-10 整数
+    - auto: 必须为 boolean，不可为 truthy/falsy 其他类型
+    - source: 必须在允许值白名单中
+    """
+    if content is None or not isinstance(content, str) or not content.strip():
+        raise ValueError("content is required and must be a non-empty string")
+    content_str = content.strip()
+
+    if tags is not None and not isinstance(tags, str):
+        raise ValueError("tags must be a string")
+    tags_str = (tags or "").strip()
+
+    if importance is not None:
+        if not isinstance(importance, int) or isinstance(importance, bool):
+            raise ValueError("importance must be an integer")
+        if importance < 1 or importance > 10:
+            raise ValueError("importance must be between 1 and 10")
+    else:
+        importance = 5
+
+    # auto 严格 boolean 校验：拒绝 int、str 等 truthy/falsy 值
+    if auto is not None and not isinstance(auto, bool):
+        raise ValueError("auto must be a boolean (true/false)")
+
+    # source 白名单校验
+    source_str = ""
+    if source is not None:
+        if not isinstance(source, str):
+            raise ValueError("source must be a string")
+        source_str = source.strip()
+        if source_str:
+            if len(source_str) > 64:
+                raise ValueError("source must be ≤64 characters")
+            if not all(c.isalnum() or c in "-_" for c in source_str):
+                raise ValueError("source must be alphanumeric with hyphens/underscores only")
+            if source_str not in SOURCE_ALLOWLIST:
+                raise ValueError(
+                    f"source '{source_str}' is not in allowlist. "
+                    f"Allowed: {', '.join(sorted(SOURCE_ALLOWLIST))}"
+                )
+
+    return content_str, tags_str, importance, auto, source_str
 
 
 def _extract_text(result: dict) -> str:
@@ -51,6 +149,8 @@ def _event_id(caller: Caller, tool: str, normalized_input: dict) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:32]
 
 
+# ─── MCP 适配桥 ───────────────────────────────────────────────────────────────
+
 class MCPBridge:
     """MCP 适配桥。"""
 
@@ -64,9 +164,9 @@ class MCPBridge:
     async def handle_breath(
         self,
         caller: Caller,
-        query: str | None = None,
-        max_results: int | None = None,
-        max_tokens: int | None = None,
+        query: Any = None,
+        max_results: Any = None,
+        max_tokens: Any = None,
     ) -> dict:
         """
         适配 XinChao 的 breath(query, max_results, max_tokens) 调用。
@@ -75,48 +175,39 @@ class MCPBridge:
         - 非空 query → 调用上游 trace(query, limit)
         - 空 query → 调用上游零参 breath()
         """
-        query = (query or "").strip()
-        req_max_results = _clamp(max_results, 1, self.config.breath_max_results_limit, self.config.breath_default_max_results)
-        req_max_tokens = _clamp(max_tokens, 100, self.config.breath_max_tokens_limit, self.config.breath_default_max_tokens)
+        query_str, req_max_results, req_max_tokens = _validate_breath(
+            query, max_results, max_tokens, self.config
+        )
 
-        route = "trace" if query else "breath"
-        applied_max_results = req_max_results
-        applied_max_tokens = req_max_tokens
+        route = "trace" if query_str else "breath"
 
         try:
-            if query:
-                # 有 query：调用 trace，limit = clamp(max_results, 1, 20)
-                upstream_result = await self.nocturne.trace(query, limit=applied_max_results)
+            if query_str:
+                upstream_result = await self.nocturne.trace(query_str, limit=req_max_results)
             else:
-                # 无 query：调用零参 breath()
                 upstream_result = await self.nocturne.breath()
 
             text = _extract_text(upstream_result)
 
-            # token 截断（在 adapter 层施加 max_tokens 上限）
+            # token 截断（字符级近似；精确做法需 tiktoken）
             truncated = False
-            # 简单字符级截断；更精确的做法用 tiktoken
-            if len(text) > applied_max_tokens:
-                text = text[:applied_max_tokens]
+            if len(text) > req_max_tokens:
+                text = text[:req_max_tokens]
                 truncated = True
 
-            # 构建确定性 metadata
             metadata = {
                 "route": route,
-                "query_honored": bool(query),
-                "requested_max_results": req_max_results,
-                "applied_max_results": applied_max_results,
-                "requested_max_tokens": req_max_tokens,
-                "applied_max_tokens": applied_max_tokens,
+                "query_honored": bool(query_str),
+                "max_results": req_max_results,
+                "max_tokens": req_max_tokens,
                 "truncated": truncated,
                 "upstream_snapshot": self.config.upstream_commit,
             }
 
-            # 记录 provenance
             event_id = _event_id(caller, "breath", {
-                "query": query,
-                "max_results": max_results,
-                "max_tokens": max_tokens,
+                "query": query_str,
+                "max_results": req_max_results,
+                "max_tokens": req_max_tokens,
             })
             self.provenance.record(
                 event_id=event_id,
@@ -124,7 +215,7 @@ class MCPBridge:
                 caller_subject=caller.subject,
                 auto=None,
                 source=None,
-                input_payload={"query": query, "max_results": max_results, "max_tokens": max_tokens},
+                input_payload={"query": query_str, "max_results": req_max_results, "max_tokens": req_max_tokens},
                 target_kind="nocturne",
                 target_ref=None,
                 result_payload={"text_length": len(text), "truncated": truncated},
@@ -146,40 +237,32 @@ class MCPBridge:
     async def handle_hold(
         self,
         caller: Caller,
-        content: str,
-        tags: str = "",
-        importance: int = 5,
-        auto: bool | None = None,
-        source: str | None = None,
+        content: Any = None,
+        tags: Any = None,
+        importance: Any = None,
+        auto: Any = None,
+        source: Any = None,
     ) -> dict:
         """
         适配 XinChao 的 hold(content, tags, importance, auto, source) 调用。
 
         处理规则：
-        1. 校验 auto 为 boolean，source 为受限标识（长度 ≤64）
-        2. 将来源物化为 Nocturne tags：保留调用方 tags，附加 origin:xinchao、source:<source>、auto:true|false
-        3. 以 event_id 做幂等键，重复请求返回第一次的 target ref
+        1. 严格参数校验（见 _validate_hold）
+        2. 将来源物化为 Nocturne tags
+        3. 以 event_id + input_hash 做幂等键，先写账本再调用上游
         4. 记录 adapter_provenance
         """
-        content = (content or "").strip()
-        if not content:
-            raise ValueError("content is required")
-
-        # 校验 source
-        source = (source or "").strip()
-        if source and len(source) > 64:
-            raise ValueError("source must be ≤64 characters")
-        if source and not all(c.isalnum() or c in "-_" for c in source):
-            raise ValueError("source must be alphanumeric with hyphens/underscores only")
+        content_str, tags_str, importance_val, auto_val, source_str = _validate_hold(
+            content, tags, importance, auto, source
+        )
 
         # 构建增强 tags
-        tag_parts = [t.strip() for t in (tags or "").split(",") if t.strip()]
+        tag_parts = [t.strip() for t in tags_str.split(",") if t.strip()]
         tag_parts.append("origin:xinchao")
-        if source:
-            tag_parts.append(f"source:{source}")
-        if auto is not None:
-            tag_parts.append(f"auto:{str(auto).lower()}")
-        # 去重并保持稳定顺序
+        if source_str:
+            tag_parts.append(f"source:{source_str}")
+        if auto_val is not None:
+            tag_parts.append(f"auto:{str(auto_val).lower()}")
         seen = set()
         final_tags = []
         for t in tag_parts:
@@ -190,15 +273,15 @@ class MCPBridge:
 
         # 幂等键
         normalized_input = {
-            "content": content,
-            "tags": tags,
-            "importance": importance,
-            "auto": auto,
-            "source": source,
+            "content": content_str,
+            "tags": tags_str,
+            "importance": importance_val,
+            "auto": auto_val,
+            "source": source_str,
         }
         event_id = _event_id(caller, "hold", normalized_input)
 
-        # 检查幂等性
+        # 检查幂等性（数据库层防并发）
         existing = self.provenance.check_idempotency(event_id, normalized_input)
         if existing and existing.get("target_ref"):
             logger.info("hold idempotent hit: event_id=%s target_ref=%s", event_id, existing["target_ref"])
@@ -209,33 +292,31 @@ class MCPBridge:
 
         try:
             upstream_result = await self.nocturne.hold(
-                content=content,
+                content=content_str,
                 kind="memory",
                 tags=tag_str,
-                importance=importance,
+                importance=importance_val,
             )
 
             text = _extract_text(upstream_result)
-            # 尝试从结果中提取 target ref（通常是 bucket id）
+            # 尝试从结果中提取 target ref（bucket id）
             target_ref = None
-            import re
             m = re.search(r"[a-f0-9]{12,}", text)
             if m:
                 target_ref = m.group(0)
 
-            # 记录 provenance
             self.provenance.record(
                 event_id=event_id,
                 tool_name="hold",
                 caller_subject=caller.subject,
-                auto=auto,
-                source=source,
+                auto=auto_val,
+                source=source_str,
                 input_payload=normalized_input,
                 target_kind="nocturne_bucket",
                 target_ref=target_ref,
                 result_payload={"text": text[:200]},
                 idempotency_status="new",
-                metadata={"tags": final_tags, "importance": importance},
+                metadata={"tags": final_tags, "importance": importance_val},
             )
 
             return {
@@ -243,19 +324,18 @@ class MCPBridge:
                 "metadata": {
                     "target_ref": target_ref,
                     "tags": final_tags,
-                    "source": source,
-                    "auto": auto,
+                    "source": source_str,
+                    "auto": auto_val,
                 },
             }
 
         except Exception as e:
-            # 记录失败 provenance
             self.provenance.record(
                 event_id=event_id,
                 tool_name="hold",
                 caller_subject=caller.subject,
-                auto=auto,
-                source=source,
+                auto=auto_val,
+                source=source_str,
                 input_payload=normalized_input,
                 target_kind="nocturne_bucket",
                 target_ref=None,

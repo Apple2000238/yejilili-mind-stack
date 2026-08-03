@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS adapter_provenance (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     idempotency_status TEXT NOT NULL DEFAULT 'new',
     error TEXT,
-    metadata JSONB
+    metadata JSONB,
+    UNIQUE (event_id, tool_name, input_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_prov_event_id ON adapter_provenance(event_id);
@@ -141,3 +142,10 @@ class ProvenanceStore:
                 if row:
                     return {"target_ref": row[0], "result_hash": row[1]}
         return None
+
+    def ping(self) -> None:
+        """验证数据库连接可用。失败时抛出异常。"""
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
