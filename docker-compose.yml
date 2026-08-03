@@ -20,20 +20,26 @@ networks:
     internal: true
 
 # ─── Secret ───────────────────────────────────────────────────────────────────
+# ⚠️ 以下 secret 文件需由操作者在本地 secrets/ 目录创建，权限 600
 secrets:
   mcp_adapter_token:
     file: ./secrets/mcp_adapter_token.txt
   postgres_password:
     file: ./secrets/postgres_password.txt
-  provider_api_key:
-    file: ./secrets/provider_api_key.txt
+  openai_api_key:
+    file: ./secrets/openai_api_key.txt
+  anthropic_api_key:
+    file: ./secrets/anthropic_api_key.txt
 
 services:
   # ─── Continuity Ledger ──────────────────────────────────────────────────────
   continuity-ledger:
+    # TODO: 替换为实际锁定的 digest
+    # 获取命令: docker pull postgres:16-alpine && docker inspect --format='{{index .RepoDigests 0}}' postgres:16-alpine
     image: postgres:16-alpine@sha256:TO_BE_LOCKED
     container_name: yjll-postgres
     restart: unless-stopped
+    read_only: true
     environment:
       POSTGRES_DB: continuity_ledger
       POSTGRES_USER: continuity
@@ -43,6 +49,8 @@ services:
     volumes:
       - ledger-data:/var/lib/postgresql/data
       - ./services/continuity-ledger/migrations:/docker-entrypoint-initdb.d:ro
+      - type: tmpfs
+        target: /tmp
     networks:
       - mind
     healthcheck:
@@ -57,18 +65,22 @@ services:
           cpus: "1.0"
 
   # ─── Nocturne（上游固定快照，只读挂载源码）────────────────────────────────────
+  # ⚠️ 需先执行: ./ops/import-upstream.sh 导入固定快照源码
   nocturne:
     build:
       context: ./upstream/nocturne-memory-core
       dockerfile: Dockerfile
     container_name: yjll-nocturne
     restart: unless-stopped
+    read_only: true
     environment:
       OMBRE_PORT: "8000"
       OMBRE_TRANSPORT: streamable-http
     volumes:
       - nocturne-data:/data/buckets
       - ./upstream/nocturne-memory-core:/app:ro
+      - type: tmpfs
+        target: /tmp
     networks:
       - nocturne-private
     healthcheck:
@@ -90,6 +102,7 @@ services:
       dockerfile: Dockerfile
     container_name: yjll-adapter
     restart: unless-stopped
+    read_only: true
     environment:
       ADAPTER_PORT: "8001"
       ADAPTER_HOST: "0.0.0.0"
@@ -106,6 +119,8 @@ services:
       - postgres_password
     volumes:
       - adapter-audit:/var/log/adapter
+      - type: tmpfs
+        target: /tmp
     networks:
       - mind
       - nocturne-private
@@ -132,6 +147,7 @@ services:
       dockerfile: Dockerfile
     container_name: yjll-gateway
     restart: unless-stopped
+    read_only: true
     ports:
       - "${GATEWAY_PORT:-8080}:8002"
     environment:
@@ -144,12 +160,19 @@ services:
       ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-haiku-20241022}
-      POSTGRES_DSN: "postgresql://continuity:${POSTGRES_PASSWORD_SECRET}@continuity-ledger:5432/continuity_ledger"
+      POSTGRES_HOST: continuity-ledger
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: continuity_ledger
+      POSTGRES_USER: continuity
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     secrets:
       - openai_api_key
       - anthropic_api_key
       - postgres_password
+    volumes:
+      - type: tmpfs
+        target: /tmp
     networks:
       - public
       - mind
@@ -168,12 +191,14 @@ services:
           cpus: "0.5"
 
   # ─── XinChao（上游固定快照）───────────────────────────────────────────────────
+  # ⚠️ 需先执行: ./ops/import-upstream.sh 导入固定快照源码
   xinchao:
     build:
       context: ./upstream/xinchao-dynamic-mind
       dockerfile: Dockerfile
     container_name: yjll-xinchao
     restart: unless-stopped
+    read_only: true
     environment:
       XINCHAO_PORT: "3000"
       OMBRE_MCP_URL: "http://nocturne-adapter:8001/mcp"
@@ -183,6 +208,8 @@ services:
     volumes:
       - xinchao-data:/data/state
       - ./upstream/xinchao-dynamic-mind:/app:ro
+      - type: tmpfs
+        target: /tmp
     networks:
       - mind
     depends_on:
@@ -206,6 +233,7 @@ services:
       dockerfile: Dockerfile
     container_name: yjll-migration-cli
     profiles: [migration]
+    read_only: true
     environment:
       POSTGRES_HOST: continuity-ledger
       POSTGRES_PORT: "5432"
@@ -216,6 +244,8 @@ services:
       - postgres_password
     volumes:
       - staging-artifacts:/artifacts
+      - type: tmpfs
+        target: /tmp
     networks:
       - mind
     depends_on:
@@ -234,8 +264,9 @@ services:
       dockerfile: Dockerfile
     container_name: yjll-acceptance
     profiles: [acceptance]
+    read_only: true
     environment:
-      GATEWAY_URL: "http://edge-gateway:8080"
+      GATEWAY_URL: "http://edge-gateway:8002"
       ADAPTER_URL: "http://nocturne-adapter:8001"
     networks:
       - mind
