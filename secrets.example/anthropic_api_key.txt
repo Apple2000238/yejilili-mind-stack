@@ -1,0 +1,3 @@
+# Anthropic API Key（仅供 Edge Gateway 使用）
+# 生产环境通过 Docker Secret 注入，不提交到 Git
+sk-ant-your-anthropic-key-here
