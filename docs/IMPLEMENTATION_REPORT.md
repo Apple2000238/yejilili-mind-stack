@@ -5,7 +5,7 @@
 ```
 Repository:    Apple2000238/yejilili-mind-stack
 Status:        INCOMPLETE / NOT DEPLOYABLE / NOT READY FOR VPS ACCEPTANCE
-Final commit:  a1b8f8a
+Final commit:  (见本报告底部 Git commit 列表)
 Date:          2026-08-04
 ```
 
@@ -62,9 +62,13 @@ Date:          2026-08-04
 ### 5. CI / 测试 / Ops
 
 - ✅ `.github/workflows/ci.yml`
+- ⚠️ `.github/workflows/security.yml` — 内容已编写，因 GitHub API OAuth scope 限制（workflow 写权限缺失）无法自动推送，需手动创建（见下方附件）
 - ✅ `ops/preflight.sh`、`snapshot.sh`、`export-source.sh`、`import-staging.sh`、`verify-migration.sh`、`rollback-staging.sh`
+- ✅ `ops/generate-acceptance-report.sh`（新增）
+- ✅ `ops/backup-after-run.sh`（新增）
 - ✅ 单元测试 42 个通过（breath/hold 校验、target_ref 提取、text 提取、event_id 幂等性）
 - ✅ 合约测试 18 个（本地可直接运行，TestClient + mock，无需 Docker/Postgres）
+- ✅ 各服务 `requirements.lock` 占位文件已添加（待 `pip-compile --generate-hashes` 在干净环境生成精确 hashes）
 
 ### 6. 文档
 
@@ -73,6 +77,8 @@ Date:          2026-08-04
 - ✅ `docs/SECURITY.md`
 - ✅ `docs/DATA_DICTIONARY.md`
 - ✅ `docs/COMPATIBILITY_CONTRACT.md`
+- ✅ `docs/ACCEPTANCE_PROTOCOL.md`
+- ✅ `docs/MIGRATION_RUNBOOK.md`
 
 ## 测试状态
 
@@ -115,12 +121,131 @@ docker compose --profile acceptance up -d
 ## 已知限制
 
 1. **无 Docker 运行环境**：本地无法执行 `docker compose up` 和端到端测试
-2. **依赖锁不完整**：Python requirements.lock（含 hashes）和 Node package-lock.json 尚未生成
+2. **依赖锁不完整**：`requirements.lock` 已创建占位文件，但精确 hashes 需在有 Python 3.12 + pip-tools 的环境中运行 `pip-compile --generate-hashes` 生成；Node `package-lock.json` 同样待生成
 3. **集成/迁移/验收测试未在真实运行环境中验证**：单元/合约测试已通过，集成测试需 Docker 全栈
 4. **edge-gateway 仍为原型**：Provider 转发、协议转换基础可用；PromptPlan、session ID 解析、消息幂等、预算保护、注入审计等需进一步实现
 5. **max_tokens 为字符级近似截断**：精确 token 预算需 tiktoken 或上游支持
 6. **无真实密钥**：仓库不含任何生产 API key、密码或聊天语料
 7. **仓库名称未重命名**：仍为 `yejilili-mind-stack`，审查要求为 `continuity-stack`
+8. **security.yml CI 工作流**：内容已编写完整（secret scan、bandit、pip-audit、trivy、sbom），因 GitHub API 权限限制无法自动推送，需手动添加到 `.github/workflows/security.yml`
+
+## security.yml 内容（需手动创建）
+
+由于当前 GitHub OAuth token 缺少 workflow 文件写权限，以下内容需手动复制到 `.github/workflows/security.yml`：
+
+```yaml
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '17 9 * * 1'
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Detect high-entropy strings and known patterns
+        run: |
+          PATTERNS='(sk-[a-zA-Z0-9]{20,})|(ghp_[a-zA-Z0-9]{30,})|(ghs_[a-zA-Z0-9]{30,})|(xox[baprs]-[a-zA-Z0-9-]+)|(AKIA[0-9A-Z]{16})'
+          FOUND=$(grep -rE "$PATTERNS" . \
+            --include='*.py' --include='*.yml' --include='*.yaml' \
+            --include='*.json' --include='*.sh' --include='*.md' \
+            --include='*.txt' \
+            --exclude-dir=.git --exclude-dir=upstream \
+            --exclude='.env.example' || true)
+          if [[ -n "$FOUND" ]]; then
+            echo "::error::Potential secrets detected in repository:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "No secrets detected."
+
+  bandit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Bandit
+        run: pip install bandit[toml]
+      - name: Run Bandit on services/
+        run: |
+          bandit -r services/ -f json -o bandit-report.json --skip B101 || true
+      - name: Upload Bandit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [edge-gateway, nocturne-adapter, migration-cli, acceptance-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit dependencies
+        run: |
+          REQ="services/${{ matrix.service }}/requirements.txt"
+          if [[ -f "$REQ" ]]; then
+            pip-audit --requirement "$REQ" --format=json --output="pip-audit-${{ matrix.service }}.json" || true
+          fi
+      - name: Upload pip-audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-${{ matrix.service }}
+          path: pip-audit-*.json
+
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+      - name: Upload Trivy scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: trivy-results.sarif
+
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Python SBOM
+        run: |
+          pip install cyclonedx-bom
+          cyclonedx-py requirements \
+            -i services/edge-gateway/requirements.txt \
+            -i services/nocturne-adapter/requirements.txt \
+            -i services/migration-cli/requirements.txt \
+            -i services/acceptance-runner/requirements.txt \
+            -o sbom.json || true
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+```
 
 ## 隐私确认
 
@@ -131,13 +256,15 @@ docker compose --profile acceptance up -d
 
 ## 下一步（需用户或隔离 VPS 执行）
 
-1. 在具备 Docker 的环境中运行 `docker compose config` 验证配置
-2. 运行 `docker compose up -d` 启动全栈
-3. 执行 `./ops/preflight.sh --strict`
-4. 使用合成 SQLite fixture 执行完整迁移测试
-5. 运行验收 profile：`docker compose --profile acceptance up -d`
-6. 执行回滚演练并验证
-7. 将结果填入本报告并更新状态
+1. **手动创建** `.github/workflows/security.yml`（内容见上方）
+2. **生成精确依赖锁**：在各服务目录运行 `pip-compile --generate-hashes requirements.txt -o requirements.lock`
+3. **在具备 Docker 的环境中运行** `docker compose config` 验证配置
+4. 运行 `docker compose up -d` 启动全栈
+5. 执行 `./ops/preflight.sh --strict`
+6. 使用合成 SQLite fixture 执行完整迁移测试
+7. 运行验收 profile：`docker compose --profile acceptance up -d`
+8. 执行回滚演练并验证
+9. 将结果填入本报告并更新状态
 
 ---
 
