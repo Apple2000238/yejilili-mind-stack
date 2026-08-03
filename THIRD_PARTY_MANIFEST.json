@@ -8,6 +8,7 @@
       "repository_url": "https://github.com/Pyruslili/Nocturne-Memory-Core",
       "commit": "8fecd3bbce9025bf05e2c6ef2311dfe4341ef38b",
       "archive_path": "upstream/nocturne-memory-core/",
+      "archive_sha256": "59ee2d8911e75f74f16686e8e8aef6d85ba20fc3954ca6e4086f848f124a47ce",
       "license": "MIT",
       "license_file": "upstream/nocturne-memory-core/LICENSE",
       "notice_file": "upstream/nocturne-memory-core/NOTICE",
@@ -19,6 +20,7 @@
       "repository_url": "https://github.com/Apple2000238/xinchao-dynamic-mind",
       "commit": "9c36803629a98b95a4ec73c58809809800e10e6b",
       "archive_path": "upstream/xinchao-dynamic-mind/",
+      "archive_sha256": "278d613a8ad00aa63d7b397fcb917d530427dd9b27065cb64b9ec5acd9f95044",
       "license": "MIT",
       "license_file": "upstream/xinchao-dynamic-mind/LICENSE",
       "import_date": "2026-08-03",
@@ -29,11 +31,11 @@
     "python_version": "3.12",
     "node_version": "22",
     "lock_files": [
-      "services/edge-gateway/requirements.lock",
-      "services/nocturne-adapter/requirements.lock",
-      "services/migration-cli/requirements.lock",
-      "services/acceptance-runner/package-lock.json"
+      "services/edge-gateway/requirements.txt",
+      "services/nocturne-adapter/requirements.txt",
+      "services/migration-cli/requirements.txt",
+      "services/acceptance-runner/requirements.txt"
     ],
-    "image_digests": "docker-compose.yml 中每个镜像均使用锁定 digest"
+    "image_digests": "docker-compose.yml 中 postgres 镜像 digest 待锁定（当前为 TO_BE_LOCKED）"
   }
 }
