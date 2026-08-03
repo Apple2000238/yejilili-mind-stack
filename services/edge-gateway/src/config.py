@@ -25,6 +25,9 @@ class Config:
     # 可选：Postgres 配置（用于读取 edge_gateway_config 表做热切换）
     postgres_dsn: Optional[str] = None
 
+    # 管理接口鉴权（空字符串表示禁用鉴权，仅用于测试/开发）
+    admin_token: str = ""
+
 
 def _read_secret(path: str) -> str:
     if not path or not os.path.isfile(path):
@@ -46,4 +49,5 @@ def load_config() -> Config:
         anthropic_base_url=os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
         anthropic_model=os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022"),
         postgres_dsn=os.environ.get("POSTGRES_DSN") or None,
+        admin_token=_read_secret(os.environ.get("ADMIN_TOKEN_FILE", "")),
     )

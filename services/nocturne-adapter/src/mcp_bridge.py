@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from typing import Any
 
 from .auth import Caller
@@ -139,6 +138,36 @@ def _extract_text(result: dict) -> str:
     return str(content)
 
 
+def _extract_target_ref(upstream_result: dict, content_str: str) -> str:
+    """
+    从上游 hold 响应中提取可靠的 target_ref。
+    策略：
+    1. 优先从响应 JSON 的已知字段提取 bucket/memory id
+    2. 如无结构化 id，回退到内容 SHA256 前缀（确定性，不依赖上游返回格式）
+    3. 不再使用正则猜测文本中的 hex 串（不可靠且会误匹配）
+    """
+    # 策略 1：检查上游返回的结构化字段
+    result = upstream_result.get("result", upstream_result)
+    if isinstance(result, dict):
+        # 检查常见 bucket id 字段名
+        for key in ("bucket_id", "memory_id", "id", "ref", "target_ref"):
+            val = result.get(key)
+            if val and isinstance(val, str):
+                return val
+        # 检查 content 列表中的 metadata
+        content = result.get("content", [])
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    meta = block.get("metadata", {})
+                    for key in ("bucket_id", "memory_id", "id", "ref"):
+                        val = meta.get(key)
+                        if val and isinstance(val, str):
+                            return val
+    # 策略 2：回退到内容 hash（确定性，幂等）
+    return hashlib.sha256(content_str.encode("utf-8")).hexdigest()[:24]
+
+
 def _event_id(caller: Caller, tool: str, normalized_input: dict) -> str:
     """基于调用方 + 工具 + 规范化输入生成幂等键。"""
     key = json.dumps({
@@ -174,6 +203,8 @@ class MCPBridge:
         路由规则：
         - 非空 query → 调用上游 trace(query, limit)
         - 空 query → 调用上游零参 breath()
+
+        已知限制：max_tokens 截断使用字符长度近似，精确截断需 tiktoken。
         """
         query_str, req_max_results, req_max_tokens = _validate_breath(
             query, max_results, max_tokens, self.config
@@ -249,8 +280,9 @@ class MCPBridge:
         处理规则：
         1. 严格参数校验（见 _validate_hold）
         2. 将来源物化为 Nocturne tags
-        3. 以 event_id + input_hash 做幂等键，先写账本再调用上游
-        4. 记录 adapter_provenance
+        3. 以 event_id + input_hash 做幂等键，先查账本再调用上游
+        4. 使用 _extract_target_ref 从上游响应提取可靠 target_ref
+        5. 记录 adapter_provenance
         """
         content_str, tags_str, importance_val, auto_val, source_str = _validate_hold(
             content, tags, importance, auto, source
@@ -299,11 +331,8 @@ class MCPBridge:
             )
 
             text = _extract_text(upstream_result)
-            # 尝试从结果中提取 target ref（bucket id）
-            target_ref = None
-            m = re.search(r"[a-f0-9]{12,}", text)
-            if m:
-                target_ref = m.group(0)
+            # 使用结构化提取替代正则猜测
+            target_ref = _extract_target_ref(upstream_result, content_str)
 
             self.provenance.record(
                 event_id=event_id,

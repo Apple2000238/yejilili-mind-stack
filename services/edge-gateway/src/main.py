@@ -37,6 +37,19 @@ def _get_provider(name: str | None = None):
     return _providers[name]
 
 
+def _require_admin_auth(request: Request) -> None:
+    """检查管理接口的 Bearer token 鉴权。admin_token 为空时跳过（仅测试/开发）。"""
+    if not config.admin_token:
+        return
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    token = auth[7:].strip()
+    if token != config.admin_token:
+        logger.warning("admin auth failed: invalid token from %s", request.client)
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+
 # ─── FastAPI ───────────────────────────────────────────────────────────────────
 app = FastAPI(title="Edge Gateway", version="1.0.0")
 
@@ -68,8 +81,9 @@ async def providers() -> dict:
 async def switch_provider(request: Request) -> dict:
     """
     热切换 provider（仅 mock/openai/anthropic）。
-    生产环境应加鉴权。
+    需要 Bearer admin_token 鉴权（admin_token 为空时跳过，仅用于测试/开发）。
     """
+    _require_admin_auth(request)
     global _current_provider_name
     body = await request.json()
     name = body.get("provider", "").lower()

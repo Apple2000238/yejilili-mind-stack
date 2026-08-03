@@ -30,6 +30,8 @@ secrets:
     file: ./secrets/openai_api_key.txt
   anthropic_api_key:
     file: ./secrets/anthropic_api_key.txt
+  admin_token:
+    file: ./secrets/admin_token.txt
 
 services:
   # ─── Continuity Ledger ──────────────────────────────────────────────────────
@@ -37,8 +39,6 @@ services:
     # 镜像 digest 锁定（postgres:16-alpine, 2026-06 security-scan verified）
     # 获取命令: docker pull postgres:16-alpine && docker inspect --format='{{index .RepoDigests 0}}' postgres:16-alpine
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
-    # 获取命令: docker pull postgres:16-alpine && docker inspect --format='{{index .RepoDigests 0}}' postgres:16-alpine
-    image: postgres:16-alpine@sha256:TO_BE_LOCKED
     container_name: yjll-postgres
     restart: unless-stopped
     read_only: true
@@ -167,11 +167,13 @@ services:
       POSTGRES_DB: continuity_ledger
       POSTGRES_USER: continuity
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      ADMIN_TOKEN_FILE: /run/secrets/admin_token
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     secrets:
       - openai_api_key
       - anthropic_api_key
       - postgres_password
+      - admin_token
     volumes:
       - type: tmpfs
         target: /tmp
