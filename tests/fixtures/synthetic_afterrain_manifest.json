@@ -1,0 +1,40 @@
+{
+  "generated_at": "2026-08-03T18:14:43.028863+00:00",
+  "quick_check": "ok",
+  "tables": {
+    "ar_buckets": 5,
+    "ar_dreams": 3,
+    "ar_state": 0,
+    "ar_whispers": 2,
+    "chat_sessions": 2,
+    "daily_summaries": 0,
+    "diary": 2,
+    "knots": 2,
+    "memory_layers": 4,
+    "message_archive": 5,
+    "message_buffer": 2,
+    "persona": 3,
+    "proactive_messages": 0,
+    "promises": 3,
+    "room_visits": 0,
+    "weekly_summaries": 0
+  },
+  "merkles": {
+    "ar_buckets": "e8e630a903bb310e71d485b59b39248d2fa3cf0683ea485d04658a7a11110e42",
+    "ar_dreams": "87cb48637ea49c4909fc7041d8a37e1b7525a3ffd64dec897c6e30a202099a75",
+    "ar_state": "",
+    "ar_whispers": "462283fbaf8234a881fcb12235b6fbadd68c7e95fb666d1eef525756f9a77000",
+    "chat_sessions": "b3d62556cb1da7c62b5076c54febf37486b8fcffc8b094165dae4753c12b6fb9",
+    "daily_summaries": "",
+    "diary": "aa419702d231b1b6c6ca51263051a164784db999d69f83b80e05d53401b25c10",
+    "knots": "29e142aebb5db722bd27a5fbe3fc31d9102a42f2865b51648b2d52666fd53af2",
+    "memory_layers": "e112a28f8e13230e4d7952538aa162a3c41909411473580a37180de4058bca2e",
+    "message_archive": "9cd01b779f5b510e2347690e85ef82a0b9c89cd088904947e01903e2f187992d",
+    "message_buffer": "2feb7ea0ba562d8a248f888d0ad7269f44fbea1c99b0b656313a026280fe36da",
+    "persona": "6db85a8af6d7c9b4077bff8ce10dcab91641bb621b5525dce1b4937cf8f6a3d7",
+    "proactive_messages": "",
+    "promises": "de74d6a3a1fbbb30e5446ef24ada96e7ad6534d10322b4dffc838d1dd1766b8f",
+    "room_visits": "",
+    "weekly_summaries": ""
+  }
+}
