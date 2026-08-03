@@ -1,0 +1,24 @@
+Nocturne Memory Core
+
+This public edition contains the reusable continuity, memory, retrieval,
+analysis, and Dashboard mechanisms. Private identity material, relationship
+history, memory data, artwork, credentials, device integrations, animated
+opening, Atmosphere, Gravity, and household room topology are not distributed.
+
+## Provenance
+
+Nocturne Memory Core is a secondary development of the memory-core lineage of
+Ombre Brain by @P0luz:
+
+  https://github.com/P0luz/Ombre-Brain
+
+It retains the Markdown / YAML memory substrate, hold / breath retrieval loop,
+Dashboard-oriented operation, and natural archival / decay machinery, and adds
+continuity layers such as selective Breath composition, Drive / DP traces,
+Thought Pool, latent fragments, Marginalia / Shape Trace, Trails, and
+related write-back paths.
+
+Ombre Brain continues as its own project. Feature sets diverge; this package
+is not a drop-in of any particular Ombre Brain release.
+
+See LICENSE for copyright and license terms of this distribution.
