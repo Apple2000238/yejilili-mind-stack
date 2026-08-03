@@ -13,4 +13,5 @@ COPY src/ ./src/
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "src.main"]
+# 默认列出迁移运行记录；实际使用时通过 docker compose run 覆盖命令参数
+CMD ["python", "-m", "src.main", "list-runs"]
