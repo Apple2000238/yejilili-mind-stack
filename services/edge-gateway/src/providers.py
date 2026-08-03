@@ -22,7 +22,7 @@ class MockProvider:
     不调用外部 API，返回结构化占位响应。
     """
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.call_count = 0
 
     async def chat_completions(self, messages: list[dict], model: str, **kwargs) -> dict:
@@ -65,6 +65,36 @@ class MockProvider:
             yield f"data: {json.dumps({'choices': [{'index': 0, 'delta': {'content': word + ' '}, 'finish_reason': None}]})}\n\n"
         yield f"data: {json.dumps({'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
         yield "data: [DONE]\n\n"
+
+    # ── Anthropic 协议兼容（mock 转译）────────────────────────────────────
+
+    async def messages(self, messages: list[dict], model: str, stream: bool = False, system: str = "", **kwargs) -> dict | AsyncIterator[str]:
+        self.call_count += 1
+        prompt = system + "\n"
+        for m in messages:
+            prompt += m.get("content", "")
+        import hashlib
+        content_hash = hashlib.sha256(prompt.encode()).hexdigest()[:16]
+        content = f"[mock] echo hash: {content_hash}"
+
+        if stream:
+            return self._messages_stream(content, model or "mock-model")
+
+        return {
+            "id": f"mock-msg-{self.call_count}",
+            "type": "message",
+            "role": "assistant",
+            "model": model or "mock-model",
+            "content": [{"type": "text", "text": content}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": len(prompt), "output_tokens": 10},
+        }
+
+    async def _messages_stream(self, content: str, model: str) -> AsyncIterator[str]:
+        yield json.dumps({"type": "message_start", "message": {"id": f"mock-msg-{self.call_count}", "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "usage": {"input_tokens": 0, "output_tokens": 0}}}) + "\n"
+        for word in content.split():
+            yield json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": word + " "}}) + "\n"
+        yield json.dumps({"type": "message_stop"}) + "\n"
 
 
 # ─── OpenAI Provider ─────────────────────────────────────────────────

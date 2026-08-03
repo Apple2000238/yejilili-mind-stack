@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import httpx
 import json
 import logging
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import load_config
