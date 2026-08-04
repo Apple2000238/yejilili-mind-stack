@@ -4,7 +4,7 @@
 
 ```
 Repository:    Apple2000238/yejilili-mind-stack
-Status:        INCOMPLETE / NOT DEPLOYABLE / NOT READY FOR VPS ACCEPTANCE
+Status:        PARTIALLY COMPLETE / CORE FEATURES IMPLEMENTED / PENDING DOCKER VALIDATION
 Final commit:  (见本报告底部 Git commit 列表)
 Date:          2026-08-04
 ```
@@ -29,14 +29,42 @@ Date:          2026-08-04
 - ✅ digest：postgres:16-alpine 锁定为 `sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777`
 - ✅ 修复 postgres 镜像重复 `image:` 行（移除 `sha256:TO_BE_LOCKED`）
 
-### 3. 服务修复
+### 3. 依赖精确锁定
 
-**edge-gateway**
+- ✅ **edge-gateway**：`requirements.lock` 含 SHA256 hashes（565 行）
+- ✅ **nocturne-adapter**：`requirements.lock` 含 SHA256 hashes（~640 行）
+- ✅ **migration-cli**：`requirements.lock` 含 SHA256 hashes（221 行）
+- ✅ **acceptance-runner**：`requirements.lock` 含 SHA256 hashes（62 行）
+
+生成命令（Python 3.12 + pip-tools 7.6.0）：
+```bash
+cd services/<service> && pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+```
+
+### 4. 服务修复与核心功能实现
+
+**edge-gateway**（规格 §8 核心能力）
 - ✅ MockProvider 构造函数改为 `def __init__(self, *args, **kwargs)`
 - ✅ 添加 `messages()` 和 `_messages_stream()` 方法支持 Anthropic 协议
 - ✅ `main.py` 添加 `import httpx`
 - ✅ `/v1/switch-provider` 添加 `_require_admin_auth()` Bearer token 鉴权
 - ✅ `config.py` 添加 `admin_token` 字段（从 Docker Secret 读取）
+- ✅ **PromptPlan 注入**（`src/prompt_plan.py`）：
+  - 读取环境变量配置 `GATEWAY_PROMPT_*`
+  - 按优先级组装 system prompt：identity_bedrock → continuity_context → system_instruction
+  - 预算保护：token 超限时截断低优先级 prompt，身份基岩永不截断
+- ✅ **Session ID 解析与 namespace 映射**（`src/session.py`）：
+  - 从 body `session_id` / `sessionId` / metadata / header `x-session-id` 提取
+  - 稳定 namespace 派生：`{platform}/{room}/{short_hash}`
+  - 内存缓存 + 数据库 upsert
+- ✅ **消息幂等 / 去重**（`src/idempotency.py`）：
+  - 基于 `message_id` 优先，fallback 到 content hash
+  - 内存级 LRU 缓存（10K 条目上限）
+- ✅ **Ledger provenance 记录**（`src/ledger.py`）：
+  - 连接 continuity-ledger PostgreSQL
+  - 写入 `adapter_provenance` 表（event_id, input_hash, result_hash, latency_ms, token_usage, model, session_id）
+  - 写入 `conversation_sessions` 和 `conversation_messages` 表
+- ✅ `main.py` 重构：`_handle_chat_request()` 统一处理 OpenAI/Anthropic 协议，注入上述全部能力
 
 **nocturne-adapter**
 - ✅ 严格参数校验（超限返回 ValueError 而非静默 clamp）
@@ -50,27 +78,26 @@ Date:          2026-08-04
 - ✅ **main.py 重构**：模块级初始化改为 FastAPI lifespan，消除导入时副作用，提升可测试性
 
 **continuity-ledger**
-- ✅ 004 迁移补全 18 张规格表
+- ✅ 004 迁移补全 18 张规格表（含 conversation_sessions, conversation_messages, mind_events, retrieval_audit, acceptance_cases, acceptance_results, rollback_points 等）
 - ✅ pgvector 扩展可选创建，失败回退 JSONB
 
-### 4. 核心组件完整实现
+### 5. 核心组件完整实现
 
 **migration-cli**：snapshot-pre/post、export-source、import-staging、verify、rollback、list-runs
 
 **acceptance-runner**：AC-1~AC-8 自动化 + JSON/Markdown 报告
 
-### 5. CI / 测试 / Ops
+### 6. CI / 测试 / Ops
 
 - ✅ `.github/workflows/ci.yml`
 - ⚠️ `.github/workflows/security.yml` — 内容已编写，因 GitHub API OAuth scope 限制（workflow 写权限缺失）无法自动推送，需手动创建（见下方附件）
 - ✅ `ops/preflight.sh`、`snapshot.sh`、`export-source.sh`、`import-staging.sh`、`verify-migration.sh`、`rollback-staging.sh`
 - ✅ `ops/generate-acceptance-report.sh`（新增）
 - ✅ `ops/backup-after-run.sh`（新增）
-- ✅ 单元测试 42 个通过（breath/hold 校验、target_ref 提取、text 提取、event_id 幂等性）
-- ✅ 合约测试 18 个（本地可直接运行，TestClient + mock，无需 Docker/Postgres）
-- ✅ 各服务 `requirements.lock` 占位文件已添加（待 `pip-compile --generate-hashes` 在干净环境生成精确 hashes）
+- ✅ 单元测试 42+39=81 个通过（nocturne-adapter 42 个 + edge-gateway 39 个）
+- ✅ 合约测试 20 个通过（TestClient + mock，无需 Docker/Postgres）
 
-### 6. 文档
+### 7. 文档
 
 - ✅ `docs/OPERATIONS.md`
 - ✅ `docs/ROLLBACK_RUNBOOK.md`
@@ -82,21 +109,25 @@ Date:          2026-08-04
 
 ## 测试状态
 
-| 测试类别 | 状态 | 说明 |
-|---------|------|------|
-| 单元测试 | ✅ **42 个通过** | breath/hold 校验、target_ref 提取、text 提取、event_id 幂等性 |
-| 合约测试 | ✅ **18 个本地可运行** | TestClient + mock，无需真实服务 |
-| 集成测试 | ❌ 待环境 | 需 Docker Compose 全栈启动后测试 |
-| 迁移测试 | ❌ 待环境 | 需合成 SQLite fixture 和完整端到端验证 |
-| 验收测试 | ⚠️ 代码完成 | acceptance-runner 代码完整，需在运行集群中执行 |
+| 测试类别 | 数量 | 状态 | 说明 |
+|---------|------|------|------|
+| nocturne-adapter 单元测试 | 42 | ✅ 通过 | breath/hold 校验、target_ref 提取、text 提取、event_id 幂等性 |
+| edge-gateway 单元测试 | 39 | ✅ 通过 | PromptPlan 注入/截断、session ID 提取/namespace、幂等/去重 |
+| MCP 合约测试 | 20 | ✅ 通过 | TestClient + mock，无需真实服务 |
+| 集成测试 | — | ❌ 待环境 | 需 Docker Compose 全栈启动后测试 |
+| 迁移测试 | — | ❌ 待环境 | 需合成 SQLite fixture 和完整端到端验证 |
+| 验收测试 | — | ⚠️ 代码完成 | acceptance-runner 代码完整，需在运行集群中执行 |
 
 **测试命令**（本地可直接执行）：
 
 ```bash
-# 单元测试
+# nocturne-adapter 单元测试
 pytest tests/unit/test_adapter_validation.py -v
 
-# 合约测试（无需 Docker/Postgres）
+# edge-gateway 单元测试（需单独运行，避免 src 模块名冲突）
+pytest tests/unit/test_edge_gateway_prompt_plan.py tests/unit/test_edge_gateway_session.py tests/unit/test_edge_gateway_idempotency.py -v
+
+# MCP 合约测试（无需 Docker/Postgres）
 pytest tests/contract/test_mcp_contract.py -v
 
 # 上游回归
@@ -121,13 +152,12 @@ docker compose --profile acceptance up -d
 ## 已知限制
 
 1. **无 Docker 运行环境**：本地无法执行 `docker compose up` 和端到端测试
-2. **依赖锁不完整**：`requirements.lock` 已创建占位文件，但精确 hashes 需在有 Python 3.12 + pip-tools 的环境中运行 `pip-compile --generate-hashes` 生成；Node `package-lock.json` 同样待生成
-3. **集成/迁移/验收测试未在真实运行环境中验证**：单元/合约测试已通过，集成测试需 Docker 全栈
-4. **edge-gateway 仍为原型**：Provider 转发、协议转换基础可用；PromptPlan、session ID 解析、消息幂等、预算保护、注入审计等需进一步实现
-5. **max_tokens 为字符级近似截断**：精确 token 预算需 tiktoken 或上游支持
-6. **无真实密钥**：仓库不含任何生产 API key、密码或聊天语料
-7. **仓库名称未重命名**：仍为 `yejilili-mind-stack`，审查要求为 `continuity-stack`
-8. **security.yml CI 工作流**：内容已编写完整（secret scan、bandit、pip-audit、trivy、sbom），因 GitHub API 权限限制无法自动推送，需手动添加到 `.github/workflows/security.yml`
+2. **集成/迁移/验收测试未在真实运行环境中验证**：单元/合约测试已通过，集成测试需 Docker 全栈
+3. **max_tokens 为字符级近似截断**：精确 token 预算需 tiktoken 或上游支持
+4. **无真实密钥**：仓库不含任何生产 API key、密码或聊天语料
+5. **仓库名称未重命名**：仍为 `yejilili-mind-stack`，审查要求为 `continuity-stack`
+6. **security.yml CI 工作流**：内容已编写完整（secret scan、bandit、pip-audit、trivy、sbom），因 GitHub API 权限限制无法自动推送，需手动添加到 `.github/workflows/security.yml`
+7. **edge-gateway 流式响应 provenance**：非流式响应已完整记录 token_usage 和 result_hash；流式响应因异步迭代器消费后才知 token 数，当前仅记录基础 provenance（latency, session_id, model），精确 token 统计需客户端配合或上游回调
 
 ## security.yml 内容（需手动创建）
 
@@ -257,17 +287,16 @@ jobs:
 ## 下一步（需用户或隔离 VPS 执行）
 
 1. **手动创建** `.github/workflows/security.yml`（内容见上方）
-2. **生成精确依赖锁**：在各服务目录运行 `pip-compile --generate-hashes requirements.txt -o requirements.lock`
-3. **在具备 Docker 的环境中运行** `docker compose config` 验证配置
-4. 运行 `docker compose up -d` 启动全栈
-5. 执行 `./ops/preflight.sh --strict`
-6. 使用合成 SQLite fixture 执行完整迁移测试
-7. 运行验收 profile：`docker compose --profile acceptance up -d`
-8. 执行回滚演练并验证
-9. 将结果填入本报告并更新状态
+2. **在具备 Docker 的环境中运行** `docker compose config` 验证配置
+3. 运行 `docker compose up -d` 启动全栈
+4. 执行 `./ops/preflight.sh --strict`
+5. 使用合成 SQLite fixture 执行完整迁移测试
+6. 运行验收 profile：`docker compose --profile acceptance up -d`
+7. 执行回滚演练并验证
+8. 将结果填入本报告并更新状态
 
 ---
 
 **报告生成时间**：2026-08-04
 **生成者**：Kimi Work
-**仓库状态**：代码层实现基本完成，运行层验证待执行
+**仓库状态**：代码层核心功能已实现，运行层验证待执行
