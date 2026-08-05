@@ -93,6 +93,18 @@ async def _shutdown() -> None:
 # ─── 健康检查 ──────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
+    if not _ledger._available:
+        raise HTTPException(status_code=503, detail="Ledger unavailable")
+    return {
+        "status": "ok",
+        "service": "edge-gateway",
+        "providers": list_providers(),
+        "current_provider": _current_provider_name,
+        "prompt_plan_enabled": _prompt_plan.enabled,
+        "ledger_available": _ledger._available,
+    }
+@app.get("/health")
+async def health() -> dict:
     return {
         "status": "ok",
         "service": "edge-gateway",
@@ -259,6 +271,17 @@ async def _handle_chat_request(
         _record_provenance(event_id, input_hash, None, provider_name, model, session_id, start_time)
 
     # ── 8. 返回响应 ────────────────────────────────────────────────────────
+    if stream:
+        return StreamingResponse(result, media_type="text/event-stream")
+
+    if protocol == "anthropic":
+        # Anthropic 原生接口必须返回 Anthropic 协议结构
+        return JSONResponse(result)
+
+    # OpenAI 兼容接口：如底层调用 Anthropic provider，需转换为 OpenAI 格式
+    if provider_name == "anthropic":
+        return JSONResponse(_anthropic_to_openai(result, model))
+    return JSONResponse(result)
     if stream:
         if protocol == "anthropic" or provider_name == "anthropic":
             return StreamingResponse(result, media_type="text/event-stream")
