@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0.0",
+  "entries": [
+    {
+      "schema_version": "1.0.0",
+      "manifest_id": "manifest-001",
+      "bucket_id": "identity-core",
+      "reason": "身份基岩 bucket，禁止衰减",
+      "protection": "pinned",
+      "expected_source_ref": "identity-bedrock-v1",
+      "added_at": "2026-08-05T00:00:00+0800",
+      "added_by": "continuity-guard-init",
+      "active": true
+    },
+    {
+      "schema_version": "1.0.0",
+      "manifest_id": "manifest-002",
+      "bucket_id": "relationship-history",
+      "reason": "关系历史 bucket，禁止衰减",
+      "protection": "pinned",
+      "expected_source_ref": "relationship-v1",
+      "added_at": "2026-08-05T00:00:00+0800",
+      "added_by": "continuity-guard-init",
+      "active": true
+    },
+    {
+      "schema_version": "1.0.0",
+      "manifest_id": "manifest-003",
+      "bucket_id": "core-promises",
+      "reason": "核心约定 bucket，受保护但允许整理",
+      "protection": "protected",
+      "expected_source_ref": "promises-v1",
+      "added_at": "2026-08-05T00:00:00+0800",
+      "added_by": "continuity-guard-init",
+      "active": true
+    }
+  ]
+}

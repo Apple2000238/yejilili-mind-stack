@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0.0",
+  "identity_bedrock_path": "/config/identity_bedrock.md",
+  "identity_bedrock_hash": "",
+  "recent_continuity_path": "/config/recent_continuity.md",
+  "system_instruction_path": "/config/system_instruction.md",
+  "token_budget": 4000,
+  "bedrock_reserve_tokens": 800
+}
