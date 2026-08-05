@@ -47,6 +47,16 @@ POSTGRES_PASSWORD_FILE = os.environ.get("POSTGRES_PASSWORD_FILE", "/run/secrets/
 ARTIFACTS_DIR = Path("/artifacts")
 
 
+# ─── 源表 → 投影映射规则 ─────────────────────────────────────────────────────
+# 确定性映射：每张源表归属唯一投影类别，字段转换显式定义
+IDENTITY_TABLES = {"persona", "memory_layers"}
+MEMORY_TABLES = {"ar_buckets"}
+MESSAGE_TABLES = {"message_archive", "message_buffer", "chat_sessions"}
+SUMMARY_TABLES = {"daily_summaries", "weekly_summaries"}
+PROMISE_TABLES = {"promises"}
+AFFECT_TABLES = {"ar_dreams", "ar_whispers", "diary", "knots", "ar_state", "proactive_messages", "room_visits"}
+
+
 def _read_password() -> str:
     try:
         return Path(POSTGRES_PASSWORD_FILE).read_text().strip()
@@ -231,9 +241,16 @@ def export_source(source_db: str, run_id: str) -> dict[str, Any]:
         schema_text = json.dumps(schema, sort_keys=True, ensure_ascii=False)
         schema_hash = _sha256_text(schema_text)
 
-        # Merkle-ish hash of sorted rows
-        rows = check_db.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()
+        # Merkle-ish hash of sorted rows（含 rowid 以确保稳定主键语义）
+        pragma_info = check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        has_explicit_pk = any(p[5] == 1 for p in pragma_info)  # pk column
+        if has_explicit_pk:
+            rows = check_db.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()
+        else:
+            rows = check_db.execute(f'SELECT rowid, * FROM "{table_name}" ORDER BY rowid').fetchall()
         cols = [d[0] for d in check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
+        if not has_explicit_pk:
+            cols = ["rowid"] + cols
         row_hashes = []
         for row in rows:
             canonical = json.dumps(dict(zip(cols, row)), sort_keys=True, ensure_ascii=False, default=str)
@@ -244,6 +261,7 @@ def export_source(source_db: str, run_id: str) -> dict[str, Any]:
             "row_count": count,
             "schema_hash": schema_hash,
             "merkle_root": merkle,
+            "has_explicit_pk": has_explicit_pk,
         }
         manifest["total_rows"] += count
 
@@ -262,6 +280,305 @@ def export_source(source_db: str, run_id: str) -> dict[str, Any]:
     return manifest
 
 
+# ─── 稳定主键策略 ────────────────────────────────────────────────────────────
+
+def _resolve_source_pk(table_name: str, payload: dict[str, Any], has_explicit_pk: bool) -> str:
+    """返回稳定的 source_pk。
+
+    策略：
+    1. 显式 INTEGER PRIMARY KEY 表 → 使用 'id' 字段值；
+    2. 无显式 PK 表 → 使用 SELECT 时显式带出的 rowid；
+    3. 若以上均不可得 → 抛出异常（禁止静默回退到整行 hash）。
+    """
+    if has_explicit_pk:
+        pk_val = payload.get("id")
+        if pk_val is not None:
+            return str(pk_val)
+        raise ValueError(f"table {table_name} has explicit PK but 'id' is missing in payload")
+    # 无显式 PK：export_source 已强制 SELECT rowid
+    rowid_val = payload.get("rowid")
+    if rowid_val is not None:
+        return str(rowid_val)
+    raise ValueError(f"table {table_name} lacks explicit PK and rowid is missing; cannot determine stable source_pk")
+
+
+# ─── Projection 映射 ─────────────────────────────────────────────────────────
+
+def _insert_identity_projection(pg: psycopg.Connection, run_id: str, mapping_version: str, records: list[dict]) -> int:
+    """将 persona / memory_layers 映射到 identity_projection。"""
+    inserted = 0
+    for rec in records:
+        table = rec["source_table"]
+        pk = rec["source_pk"]
+        payload = rec["payload_json"]
+        content_hash = rec["payload_hash"]
+
+        persona_json = None
+        protected_layers = None
+
+        if table == "persona":
+            persona_json = json.dumps({
+                "name": payload.get("name"),
+                "role": payload.get("role"),
+                "content": payload.get("content"),
+                "created_at": payload.get("created_at"),
+            }, ensure_ascii=False, default=str)
+        elif table == "memory_layers":
+            protected_layers = json.dumps({
+                "layer_type": payload.get("layer_type"),
+                "layer_key": payload.get("layer_key"),
+                "content": payload.get("content"),
+                "protected": bool(payload.get("protected")),
+            }, ensure_ascii=False, default=str)
+
+        if persona_json or protected_layers:
+            pg.execute(
+                """
+                INSERT INTO identity_projection
+                (run_id, source_table, source_pk, source_content_hash, mapping_version, persona_json, protected_layers)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id, source_table, source_pk)
+                DO UPDATE SET
+                    source_content_hash = EXCLUDED.source_content_hash,
+                    mapping_version = EXCLUDED.mapping_version,
+                    persona_json = EXCLUDED.persona_json,
+                    protected_layers = EXCLUDED.protected_layers,
+                    updated_at = now()
+                """,
+                (run_id, table, pk, content_hash, mapping_version, persona_json, protected_layers),
+            )
+            inserted += 1
+    return inserted
+
+
+def _insert_memory_projection(pg: psycopg.Connection, run_id: str, mapping_version: str, records: list[dict]) -> int:
+    """将 ar_buckets 映射到 memory_projection。"""
+    inserted = 0
+    for rec in records:
+        payload = rec["payload_json"]
+        pk = rec["source_pk"]
+        content_hash = rec["payload_hash"]
+
+        bucket_yaml = json.dumps({
+            "name": payload.get("name"),
+            "type": payload.get("type"),
+            "domain": payload.get("domain"),
+            "tags": payload.get("tags"),
+            "valence": payload.get("valence"),
+            "arousal": payload.get("arousal"),
+            "importance": payload.get("importance"),
+            "confidence": payload.get("confidence"),
+            "resolved": bool(payload.get("resolved")),
+            "pinned": bool(payload.get("pinned")),
+            "anchor": bool(payload.get("anchor")),
+            "content_preview": payload.get("content_preview"),
+            "content_full": payload.get("content_full"),
+            "feel_text": payload.get("feel_text"),
+            "source": payload.get("source"),
+        }, ensure_ascii=False, default=str)
+
+        nocturne_ref = f"bucket-{pk}"
+        layer_type = payload.get("type", "memory")
+        protected = bool(payload.get("anchor") or payload.get("pinned"))
+
+        pg.execute(
+            """
+            INSERT INTO memory_projection
+            (run_id, source_table, source_pk, source_content_hash, mapping_version, bucket_yaml, nocturne_ref, layer_type, protected, embedding_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id, source_table, source_pk)
+            DO UPDATE SET
+                source_content_hash = EXCLUDED.source_content_hash,
+                mapping_version = EXCLUDED.mapping_version,
+                bucket_yaml = EXCLUDED.bucket_yaml,
+                nocturne_ref = EXCLUDED.nocturne_ref,
+                layer_type = EXCLUDED.layer_type,
+                protected = EXCLUDED.protected,
+                updated_at = now()
+            """,
+            (run_id, "ar_buckets", pk, content_hash, mapping_version, bucket_yaml, nocturne_ref, layer_type, protected, "pending"),
+        )
+        inserted += 1
+    return inserted
+
+
+def _insert_message_projection(pg: psycopg.Connection, run_id: str, mapping_version: str, records: list[dict]) -> int:
+    """将 message_archive / message_buffer / chat_sessions 映射到 message_projection。"""
+    inserted = 0
+    for rec in records:
+        table = rec["source_table"]
+        payload = rec["payload_json"]
+        pk = rec["source_pk"]
+        content_hash = rec["payload_hash"]
+
+        if table == "message_archive":
+            role = payload.get("role", "unknown")
+            session_id = payload.get("session_id")
+            room = payload.get("room")
+            platform = payload.get("platform")
+            content = payload.get("content")
+            archived = bool(payload.get("archived"))
+        elif table == "message_buffer":
+            role = "buffer"
+            session_id = None
+            room = None
+            platform = None
+            content = payload.get("content")
+            archived = False
+        elif table == "chat_sessions":
+            role = "session_meta"
+            session_id = payload.get("session_id")
+            room = payload.get("room")
+            platform = payload.get("platform")
+            content = None
+            archived = False
+        else:
+            continue
+
+        pg.execute(
+            """
+            INSERT INTO message_projection
+            (run_id, source_table, source_pk, source_content_hash, mapping_version, role, session_id, room, platform, content, archived)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id, source_table, source_pk)
+            DO UPDATE SET
+                source_content_hash = EXCLUDED.source_content_hash,
+                mapping_version = EXCLUDED.mapping_version,
+                role = EXCLUDED.role,
+                session_id = EXCLUDED.session_id,
+                room = EXCLUDED.room,
+                platform = EXCLUDED.platform,
+                content = EXCLUDED.content,
+                archived = EXCLUDED.archived,
+                updated_at = now()
+            """,
+            (run_id, table, pk, content_hash, mapping_version, role, session_id, room, platform, content, archived),
+        )
+        inserted += 1
+    return inserted
+
+
+def _insert_summary_projection(pg: psycopg.Connection, run_id: str, mapping_version: str, records: list[dict]) -> int:
+    """将 daily_summaries / weekly_summaries 映射到 summary_projection。"""
+    inserted = 0
+    for rec in records:
+        table = rec["source_table"]
+        payload = rec["payload_json"]
+        pk = rec["source_pk"]
+        content_hash = rec["payload_hash"]
+
+        if table == "daily_summaries":
+            summary_type = "daily"
+        elif table == "weekly_summaries":
+            summary_type = "weekly"
+        else:
+            continue
+
+        summary_text = payload.get("summary_text")
+        batch_id = payload.get("batch_id")
+
+        pg.execute(
+            """
+            INSERT INTO summary_projection
+            (run_id, source_table, source_pk, source_content_hash, mapping_version, summary_type, summary_text, batch_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id, source_table, source_pk)
+            DO UPDATE SET
+                source_content_hash = EXCLUDED.source_content_hash,
+                mapping_version = EXCLUDED.mapping_version,
+                summary_type = EXCLUDED.summary_type,
+                summary_text = EXCLUDED.summary_text,
+                batch_id = EXCLUDED.batch_id,
+                updated_at = now()
+            """,
+            (run_id, table, pk, content_hash, mapping_version, summary_type, summary_text, batch_id),
+        )
+        inserted += 1
+    return inserted
+
+
+def _insert_promise_projection(pg: psycopg.Connection, run_id: str, mapping_version: str, records: list[dict]) -> int:
+    """将 promises 映射到 promise_projection。"""
+    inserted = 0
+    for rec in records:
+        payload = rec["payload_json"]
+        pk = rec["source_pk"]
+        content_hash = rec["payload_hash"]
+
+        promise_text = payload.get("promise_text", "")
+        status = payload.get("status", "active")
+        due_date = payload.get("due_date")
+        fulfilled_at = payload.get("fulfilled_at")
+        emotion_weight = payload.get("emotion_weight")
+
+        pg.execute(
+            """
+            INSERT INTO promise_projection
+            (run_id, source_table, source_pk, source_content_hash, mapping_version, promise_text, status, due_date, fulfilled_at, emotion_weight)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id, source_table, source_pk)
+            DO UPDATE SET
+                source_content_hash = EXCLUDED.source_content_hash,
+                mapping_version = EXCLUDED.mapping_version,
+                promise_text = EXCLUDED.promise_text,
+                status = EXCLUDED.status,
+                due_date = EXCLUDED.due_date,
+                fulfilled_at = EXCLUDED.fulfilled_at,
+                emotion_weight = EXCLUDED.emotion_weight,
+                updated_at = now()
+            """,
+            (run_id, "promises", pk, content_hash, mapping_version, promise_text, status, due_date, fulfilled_at, emotion_weight),
+        )
+        inserted += 1
+    return inserted
+
+
+AFFECT_TYPE_MAP = {
+    "ar_dreams": "dream",
+    "ar_whispers": "whisper",
+    "diary": "diary",
+    "knots": "knot",
+    "ar_state": "state",
+    "proactive_messages": "proactive",
+    "room_visits": "state",
+}
+
+
+def _insert_affect_projection(pg: psycopg.Connection, run_id: str, mapping_version: str, records: list[dict]) -> int:
+    """将 ar_dreams / ar_whispers / diary / knots / ar_state / proactive_messages 映射到 affect_projection。"""
+    inserted = 0
+    for rec in records:
+        table = rec["source_table"]
+        payload = rec["payload_json"]
+        pk = rec["source_pk"]
+        content_hash = rec["payload_hash"]
+
+        affect_type = AFFECT_TYPE_MAP.get(table, "unknown")
+        content = payload.get("content")
+        pinned = bool(payload.get("pinned", 0))
+        deleted = bool(payload.get("deleted", 0))
+
+        pg.execute(
+            """
+            INSERT INTO affect_projection
+            (run_id, source_table, source_pk, source_content_hash, mapping_version, affect_type, content, pinned, deleted)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id, source_table, source_pk)
+            DO UPDATE SET
+                source_content_hash = EXCLUDED.source_content_hash,
+                mapping_version = EXCLUDED.mapping_version,
+                affect_type = EXCLUDED.affect_type,
+                content = EXCLUDED.content,
+                pinned = EXCLUDED.pinned,
+                deleted = EXCLUDED.deleted,
+                updated_at = now()
+            """,
+            (run_id, table, pk, content_hash, mapping_version, affect_type, content, pinned, deleted),
+        )
+        inserted += 1
+    return inserted
+
+
 # ─── Import staging ──────────────────────────────────────────────────────────
 
 def import_staging(run_id: str, mapping_version: str = "v1") -> dict[str, Any]:
@@ -274,52 +591,141 @@ def import_staging(run_id: str, mapping_version: str = "v1") -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     with get_pg() as pg:
-        # 创建 migration_run 记录
+        # 创建 migration_run 记录（幂等：已存在则跳过）
         pg.execute(
-            "INSERT INTO migration_runs (id, run_name, source_snapshot_hash, mapping_version, status) "
-            "VALUES (%s, %s, %s, %s, %s)",
+            """
+            INSERT INTO migration_runs (id, run_name, source_snapshot_hash, mapping_version, status)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """,
             (run_id, f"run-{run_id}", manifest["tables"].get("ar_buckets", {}).get("merkle_root", ""), mapping_version, "running"),
         )
 
         # source_table_manifest
         for table_name, info in manifest["tables"].items():
             pg.execute(
-                "INSERT INTO source_table_manifest (run_id, source_table, schema_hash, row_count, primary_key_strategy, excluded_secret_fields) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (run_id, table_name, info["schema_hash"], info["row_count"], "rowid", []),
+                """
+                INSERT INTO source_table_manifest (run_id, source_table, schema_hash, row_count, primary_key_strategy, excluded_secret_fields)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id, source_table) DO NOTHING
+                """,
+                (run_id, table_name, info["schema_hash"], info["row_count"], "explicit_id" if info.get("has_explicit_pk") else "rowid", []),
             )
 
-        # 读取临时快照并写入 source_records
+        # 读取临时快照并写入 source_records（含稳定主键）
         tmp_db = snapshot_dir / "export" / "source-snapshot-temp.db"
         if tmp_db.exists():
             src = sqlite3.connect(str(tmp_db))
-            for table_name in manifest["tables"]:
+            for table_name, info in manifest["tables"].items():
+                has_explicit_pk = info.get("has_explicit_pk", True)
+                if has_explicit_pk:
+                    rows = src.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()
+                else:
+                    rows = src.execute(f'SELECT rowid, * FROM "{table_name}" ORDER BY rowid').fetchall()
                 cols = [d[0] for d in src.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
-                rows = src.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()
+                if not has_explicit_pk:
+                    cols = ["rowid"] + cols
+
                 for row in rows:
                     payload = dict(zip(cols, row))
                     payload_json = json.dumps(payload, ensure_ascii=False, default=str)
                     payload_hash = _sha256_text(payload_json)
-                    # 用 rowid 作为 source_pk（如果存在），否则用 hash
-                    source_pk = str(payload.get("rowid", payload.get("id", payload_hash)))
+                    source_pk = _resolve_source_pk(table_name, payload, has_explicit_pk)
                     pg.execute(
-                        "INSERT INTO source_records (run_id, source_table, source_pk, payload_json, payload_hash, canonical_hash, mapping_version) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                        "ON CONFLICT (run_id, source_table, source_pk) DO NOTHING",
+                        """
+                        INSERT INTO source_records (run_id, source_table, source_pk, payload_json, payload_hash, canonical_hash, mapping_version)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (run_id, source_table, source_pk)
+                        DO UPDATE SET
+                            payload_json = EXCLUDED.payload_json,
+                            payload_hash = EXCLUDED.payload_hash,
+                            canonical_hash = EXCLUDED.canonical_hash,
+                            mapping_version = EXCLUDED.mapping_version,
+                            updated_at = now()
+                        """,
                         (run_id, table_name, source_pk, payload_json, payload_hash, payload_hash, mapping_version),
                     )
             src.close()
 
-        # 更新 migration_runs 状态
+        # 按投影类别分组读取 source_records 并写入六张投影表
+        projection_counts: dict[str, int] = {}
+
+        # identity
+        identity_rows = pg.execute(
+            "SELECT source_table, source_pk, payload_json, payload_hash FROM source_records WHERE run_id=%s AND source_table = ANY(%s)",
+            (run_id, list(IDENTITY_TABLES)),
+        ).fetchall()
+        projection_counts["identity_projection"] = _insert_identity_projection(
+            pg, run_id, mapping_version, [dict(r) for r in identity_rows]
+        )
+
+        # memory
+        memory_rows = pg.execute(
+            "SELECT source_table, source_pk, payload_json, payload_hash FROM source_records WHERE run_id=%s AND source_table = ANY(%s)",
+            (run_id, list(MEMORY_TABLES)),
+        ).fetchall()
+        projection_counts["memory_projection"] = _insert_memory_projection(
+            pg, run_id, mapping_version, [dict(r) for r in memory_rows]
+        )
+
+        # message
+        message_rows = pg.execute(
+            "SELECT source_table, source_pk, payload_json, payload_hash FROM source_records WHERE run_id=%s AND source_table = ANY(%s)",
+            (run_id, list(MESSAGE_TABLES)),
+        ).fetchall()
+        projection_counts["message_projection"] = _insert_message_projection(
+            pg, run_id, mapping_version, [dict(r) for r in message_rows]
+        )
+
+        # summary
+        summary_rows = pg.execute(
+            "SELECT source_table, source_pk, payload_json, payload_hash FROM source_records WHERE run_id=%s AND source_table = ANY(%s)",
+            (run_id, list(SUMMARY_TABLES)),
+        ).fetchall()
+        projection_counts["summary_projection"] = _insert_summary_projection(
+            pg, run_id, mapping_version, [dict(r) for r in summary_rows]
+        )
+
+        # promise
+        promise_rows = pg.execute(
+            "SELECT source_table, source_pk, payload_json, payload_hash FROM source_records WHERE run_id=%s AND source_table = ANY(%s)",
+            (run_id, list(PROMISE_TABLES)),
+        ).fetchall()
+        projection_counts["promise_projection"] = _insert_promise_projection(
+            pg, run_id, mapping_version, [dict(r) for r in promise_rows]
+        )
+
+        # affect
+        affect_rows = pg.execute(
+            "SELECT source_table, source_pk, payload_json, payload_hash FROM source_records WHERE run_id=%s AND source_table = ANY(%s)",
+            (run_id, list(AFFECT_TABLES)),
+        ).fetchall()
+        projection_counts["affect_projection"] = _insert_affect_projection(
+            pg, run_id, mapping_version, [dict(r) for r in affect_rows]
+        )
+
+        # 统计不可映射记录
+        unmappable_rows = pg.execute(
+            "SELECT source_table, COUNT(*) AS c FROM source_records WHERE run_id=%s AND source_table NOT IN (SELECT UNNEST(%s)) GROUP BY source_table",
+            (run_id, list(IDENTITY_TABLES | MEMORY_TABLES | MESSAGE_TABLES | SUMMARY_TABLES | PROMISE_TABLES | AFFECT_TABLES)),
+        ).fetchall()
+        unmappable = {r["source_table"]: r["c"] for r in unmappable_rows}
+
+        # 更新 migration_runs 状态与计数
         records_total = sum(t["row_count"] for t in manifest["tables"].values())
+        records_migrated = sum(projection_counts.values())
         pg.execute(
-            "UPDATE migration_runs SET status=%s, records_total=%s, records_migrated=%s, completed_at=now() WHERE id=%s",
-            ("completed", records_total, records_total, run_id),
+            """
+            UPDATE migration_runs
+            SET status=%s, records_total=%s, records_migrated=%s, completed_at=now(), metadata=%s
+            WHERE id=%s
+            """,
+            ("completed", records_total, records_migrated, json.dumps({"projections": projection_counts, "unmappable": unmappable}, ensure_ascii=False), run_id),
         )
         pg.commit()
 
-    logger.info("import staging completed for run %s", run_id)
-    return {"status": "completed", "records_total": records_total}
+    logger.info("import staging completed for run %s: projections=%s", run_id, projection_counts)
+    return {"status": "completed", "records_total": records_total, "projections": projection_counts, "unmappable": unmappable}
 
 
 # ─── Verify ──────────────────────────────────────────────────────────────────
@@ -332,10 +738,16 @@ def verify_run(run_id: str) -> dict[str, Any]:
         raise FileNotFoundError(f"source manifest not found: {manifest_path}")
 
     source_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    results = {"run_id": run_id, "table_checks": {}, "overall": "PASS"}
+    results: dict[str, Any] = {
+        "run_id": run_id,
+        "source_checks": {},
+        "projection_checks": {},
+        "idempotency_check": {},
+        "overall": "PASS",
+    }
 
     with get_pg() as pg:
-        # 检查 source_table_manifest 与 source_records 的行数
+        # 1) source_records 完整性
         for table_name, info in source_manifest["tables"].items():
             expected = info["row_count"]
             actual = pg.execute(
@@ -343,17 +755,80 @@ def verify_run(run_id: str) -> dict[str, Any]:
                 (run_id, table_name),
             ).fetchone()["c"]
             ok = actual == expected
-            results["table_checks"][table_name] = {"expected": expected, "actual": actual, "ok": ok}
+            results["source_checks"][table_name] = {"expected": expected, "actual": actual, "ok": ok}
             if not ok:
                 results["overall"] = "FAIL"
 
-        # 检查 migration_runs 状态
+        # 2) 六类投影数量与必填字段
+        projection_tables = [
+            ("identity_projection", IDENTITY_TABLES),
+            ("memory_projection", MEMORY_TABLES),
+            ("message_projection", MESSAGE_TABLES),
+            ("summary_projection", SUMMARY_TABLES),
+            ("promise_projection", PROMISE_TABLES),
+            ("affect_projection", AFFECT_TABLES),
+        ]
+
+        for proj_table, source_tables in projection_tables:
+            expected = pg.execute(
+                "SELECT COUNT(*) AS c FROM source_records WHERE run_id=%s AND source_table = ANY(%s)",
+                (run_id, list(source_tables)),
+            ).fetchone()["c"]
+            actual = pg.execute(
+                f"SELECT COUNT(*) AS c FROM {proj_table} WHERE run_id=%s",
+                (run_id,),
+            ).fetchone()["c"]
+            ok = actual == expected
+            results["projection_checks"][proj_table] = {"expected": expected, "actual": actual, "ok": ok}
+            if not ok:
+                results["overall"] = "FAIL"
+
+            # 必填字段非空抽查（前 10 条）
+            sample = pg.execute(
+                f"SELECT * FROM {proj_table} WHERE run_id=%s LIMIT 10",
+                (run_id,),
+            ).fetchall()
+            for row in sample:
+                if not row.get("source_pk") or not row.get("source_content_hash"):
+                    results["overall"] = "FAIL"
+                    results["projection_checks"][proj_table]["required_fields_ok"] = False
+                    break
+            else:
+                results["projection_checks"][proj_table]["required_fields_ok"] = True
+
+        # 3) migration_runs 状态
         run = pg.execute(
-            "SELECT status, records_total, records_migrated FROM migration_runs WHERE id=%s", (run_id,)
+            "SELECT status, records_total, records_migrated, metadata FROM migration_runs WHERE id=%s", (run_id,)
         ).fetchone()
         if not run or run["status"] != "completed":
             results["overall"] = "FAIL"
             results["run_status"] = run["status"] if run else "missing"
+        else:
+            results["run_status"] = run["status"]
+            # 校验 metadata 中的 projection 计数与真实表计数一致
+            meta = json.loads(run["metadata"] or "{}")
+            meta_projs = meta.get("projections", {})
+            for proj_name, meta_count in meta_projs.items():
+                real_count = pg.execute(
+                    f"SELECT COUNT(*) AS c FROM {proj_name} WHERE run_id=%s", (run_id,)
+                ).fetchone()["c"]
+                if real_count != meta_count:
+                    results["overall"] = "FAIL"
+                    results["projection_checks"][proj_name]["metadata_mismatch"] = {"metadata": meta_count, "actual": real_count}
+
+        # 4) 幂等性：projection 行数应等于 source_records 中对应源表行数（重跑不叠加）
+        for proj_table, source_tables in projection_tables:
+            src_count = pg.execute(
+                "SELECT COUNT(DISTINCT source_pk) AS c FROM source_records WHERE run_id=%s AND source_table = ANY(%s)",
+                (run_id, list(source_tables)),
+            ).fetchone()["c"]
+            proj_count = pg.execute(
+                f"SELECT COUNT(*) AS c FROM {proj_table} WHERE run_id=%s",
+                (run_id,),
+            ).fetchone()["c"]
+            results["idempotency_check"][proj_table] = {"source_pk_distinct": src_count, "projection_rows": proj_count, "ok": src_count == proj_count}
+            if src_count != proj_count:
+                results["overall"] = "FAIL"
 
     logger.info("verify result: %s", results["overall"])
     return results
