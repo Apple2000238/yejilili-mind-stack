@@ -312,6 +312,11 @@ class PromptPlanAssembler:
 
         # ── 3. 长期记忆召回（可截断，优先级高于 recent_continuity）─────────────
         memory_text, memory_hash = _read_text_file(self.config.long_term_memory_path)
+        if not memory_text and self.config.long_term_memory_path:
+            logger.warning(
+                "long_term_memory missing or empty: path=%s assembly_id=%s",
+                self.config.long_term_memory_path, assembly_id,
+            )
         if memory_text:
             memory_tokens = estimate_tokens(memory_text)
             available = remaining_soft_budget
@@ -347,6 +352,11 @@ class PromptPlanAssembler:
 
         # ── 4. recent_continuity（可截断）───────────────────────────────────────
         continuity_text, continuity_hash = _read_text_file(self.config.recent_continuity_path)
+        if not continuity_text and self.config.recent_continuity_path:
+            logger.warning(
+                "recent_continuity missing or empty: path=%s assembly_id=%s",
+                self.config.recent_continuity_path, assembly_id,
+            )
         if continuity_text:
             continuity_tokens = estimate_tokens(continuity_text)
             available = remaining_soft_budget
