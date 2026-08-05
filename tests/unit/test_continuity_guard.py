@@ -312,3 +312,53 @@ class TestLoopSuppressor:
         ok, reason = loop.check(ev)
         assert ok is False
         assert "back-loop" in reason
+
+
+class TestDashboardAuth:
+    """Dashboard 鉴权测试"""
+
+    def test_authenticate_with_correct_token(self):
+        from dashboard import DashboardService
+        svc = DashboardService("fake-dsn", dashboard_token="secret123")
+        assert svc.authenticate("secret123") is True
+
+    def test_authenticate_with_wrong_token(self):
+        from dashboard import DashboardService
+        svc = DashboardService("fake-dsn", dashboard_token="secret123")
+        assert svc.authenticate("wrong") is False
+
+    def test_authenticate_with_empty_token(self):
+        from dashboard import DashboardService
+        svc = DashboardService("fake-dsn", dashboard_token="secret123")
+        assert svc.authenticate("") is False
+
+
+class TestIdentityGateObservability:
+    """P1-05: 长期记忆/近期连续性缺失可观测性"""
+
+    def test_missing_long_term_memory_logs_warning(self, caplog):
+        import logging
+        from identity_gate import IdentityConfig, PromptPlanAssembler
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            core = Path(td) / "core.md"
+            core.write_text("Core", encoding="utf-8")
+            bedrock = Path(td) / "bedrock.md"
+            bedrock.write_text("Bedrock", encoding="utf-8")
+
+            config = IdentityConfig(
+                core_instruction_path=str(core),
+                identity_bedrock_path=str(bedrock),
+                identity_bedrock_hash="",
+                long_term_memory_path=str(Path(td) / "nonexistent_memory.md"),
+                recent_continuity_path=str(Path(td) / "nonexistent_continuity.md"),
+                token_budget=4000,
+                bedrock_reserve_tokens=800,
+                model_hard_limit=8192,
+            )
+            assembler = PromptPlanAssembler(config, Path(td) / "audit")
+            with caplog.at_level(logging.WARNING):
+                messages, record = assembler.assemble([])
+            assert "long_term_memory missing" in caplog.text or "memory" in caplog.text.lower()
