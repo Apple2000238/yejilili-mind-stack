@@ -156,6 +156,63 @@ def snapshot_pre(run_id: str, source_db: str | None) -> dict[str, Any]:
     with open(index_path, "a", encoding="utf-8") as f:
         f.write(json.dumps({"run_id": run_id, "phase": "pre", "manifest_sha256": _sha256_file(manifest_path), "at": _now_iso()}, ensure_ascii=False) + "\n")
 
+    # ── Nocturne buckets frontmatter 快照 ────────────────────────────────
+    buckets_dir = Path(os.environ.get("NOCTURNE_BUCKETS_DIR", "/data/buckets"))
+    bucket_snapshots = {}
+    if buckets_dir.exists():
+        for md_file in buckets_dir.rglob("*.md"):
+            rel = md_file.relative_to(buckets_dir).as_posix()
+            try:
+                import frontmatter
+                post = frontmatter.load(str(md_file))
+                bucket_snapshots[rel] = {
+                    "frontmatter": post.metadata,
+                    "content_preview": post.content[:500] if post.content else "",
+                    "sha256": _sha256_file(md_file),
+                }
+            except Exception as e:
+                logger.warning("bucket snapshot failed for %s: %s", rel, e)
+        buckets_path = pre_dir / "buckets-snapshot.json"
+        buckets_path.write_text(json.dumps(bucket_snapshots, ensure_ascii=False, default=str), encoding="utf-8")
+
+    # ── State 文件快照 ───────────────────────────────────────────────────
+    state_dir = Path(os.environ.get("XINCHAO_STATE_DIR", "/data/xinchao/state"))
+    state_snapshots = {}
+    if state_dir.exists():
+        for sf in state_dir.rglob("*"):
+            if sf.is_file() and sf.suffix in (".json", ".md", ".yaml", ".yml"):
+                rel = sf.relative_to(state_dir).as_posix()
+                state_snapshots[rel] = {
+                    "sha256": _sha256_file(sf),
+                    "size": sf.stat().st_size,
+                }
+                # 小文件直接备份内容
+                if sf.stat().st_size < 1024 * 1024:  # 1MB
+                    backup_dir = pre_dir / "state_backup"
+                    backup_dir.mkdir(exist_ok=True)
+                    backup_file = backup_dir / rel.replace("/", "__")
+                    try:
+                        backup_file.write_bytes(sf.read_bytes())
+                    except Exception as e:
+                        logger.warning("state backup failed for %s: %s", rel, e)
+        state_manifest_path = pre_dir / "state-snapshot.json"
+        state_manifest_path.write_text(json.dumps(state_snapshots, ensure_ascii=False, default=str), encoding="utf-8")
+
+    # ── Ledger 关键表快照（非投影表）──────────────────────────────────────
+    ledger_snapshots = {}
+    try:
+        with get_pg() as pg:
+            for tbl in ["continuity_manifest", "identity_assembly_audit"]:
+                try:
+                    cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]
+                    ledger_snapshots[tbl] = {"row_count": cnt}
+                except Exception:
+                    pass
+        ledger_path = pre_dir / "ledger-snapshot.json"
+        ledger_path.write_text(json.dumps(ledger_snapshots, ensure_ascii=False, default=str), encoding="utf-8")
+    except Exception as e:
+        logger.warning("ledger snapshot failed: %s", e)
+
     logger.info("pre snapshot created: %s", manifest_path)
     return pre_manifest
 
@@ -837,7 +894,11 @@ def verify_run(run_id: str) -> dict[str, Any]:
 # ─── Rollback ─────────────────────────────────────────────────────────────────
 
 def rollback_run(run_id: str) -> dict[str, Any]:
-    """逻辑回滚：标记 run 为 rolled_back，不删除备份。"""
+    """完整回滚：删除投影 + 恢复 buckets frontmatter / state 文件 / ledger。"""
+    snapshot_dir = ARTIFACTS_DIR / f"run-{run_id}"
+    pre_dir = snapshot_dir / "pre"
+    restored = {"projections_deleted": False, "buckets": 0, "state_files": 0, "ledger_warnings": []}
+
     with get_pg() as pg:
         # 检查 run 是否存在
         run = pg.execute("SELECT status FROM migration_runs WHERE id=%s", (run_id,)).fetchone()
@@ -847,26 +908,84 @@ def rollback_run(run_id: str) -> dict[str, Any]:
         # 创建 rollback point
         pg.execute(
             "INSERT INTO rollback_points (run_id, point_name, point_type) VALUES (%s, %s, %s)",
-            (run_id, f"rollback-at-{_now_iso()}", "logical"),
+            (run_id, f"rollback-at-{_now_iso()}", "full"),
         )
 
-        # 逻辑回滚：删除该 run 的投影数据，保留 source_records 作为证据
+        # 1. 删除该 run 的投影数据
         pg.execute("DELETE FROM identity_projection WHERE run_id=%s", (run_id,))
         pg.execute("DELETE FROM memory_projection WHERE run_id=%s", (run_id,))
         pg.execute("DELETE FROM message_projection WHERE run_id=%s", (run_id,))
         pg.execute("DELETE FROM summary_projection WHERE run_id=%s", (run_id,))
         pg.execute("DELETE FROM promise_projection WHERE run_id=%s", (run_id,))
         pg.execute("DELETE FROM affect_projection WHERE run_id=%s", (run_id,))
+        restored["projections_deleted"] = True
+
+        # 2. 恢复 Nocturne buckets frontmatter（如果 pre 快照存在）
+        buckets_snapshot_path = pre_dir / "buckets-snapshot.json"
+        if buckets_snapshot_path.exists():
+            buckets_dir = Path(os.environ.get("NOCTURNE_BUCKETS_DIR", "/data/buckets"))
+            bucket_snapshots = json.loads(buckets_snapshot_path.read_text(encoding="utf-8"))
+            for rel_path, snapshot in bucket_snapshots.items():
+                target = buckets_dir / rel_path
+                if target.exists():
+                    current_hash = _sha256_file(target)
+                    if current_hash != snapshot.get("sha256"):
+                        # 文件被修改过，尝试恢复 frontmatter
+                        try:
+                            import frontmatter
+                            post = frontmatter.load(str(target))
+                            post.metadata = snapshot["frontmatter"]
+                            # 保留当前 content（只恢复 frontmatter，不覆盖正文）
+                            frontmatter.dump(post, str(target))
+                            restored["buckets"] += 1
+                            logger.info("restored bucket frontmatter: %s", rel_path)
+                        except Exception as e:
+                            logger.error("bucket restore failed for %s: %s", rel_path, e)
+                            restored["ledger_warnings"].append(f"bucket_restore_failed:{rel_path}")
+
+        # 3. 恢复 state 文件（如果 pre 备份存在）
+        state_backup_dir = pre_dir / "state_backup"
+        state_manifest_path = pre_dir / "state-snapshot.json"
+        if state_manifest_path.exists() and state_backup_dir.exists():
+            state_dir = Path(os.environ.get("XINCHAO_STATE_DIR", "/data/xinchao/state"))
+            state_manifest = json.loads(state_manifest_path.read_text(encoding="utf-8"))
+            for rel_path, info in state_manifest.items():
+                backup_file = state_backup_dir / rel_path.replace("/", "__")
+                target = state_dir / rel_path
+                if backup_file.exists():
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(backup_file.read_bytes())
+                        restored["state_files"] += 1
+                        logger.info("restored state file: %s", rel_path)
+                    except Exception as e:
+                        logger.error("state restore failed for %s: %s", rel_path, e)
+                        restored["ledger_warnings"].append(f"state_restore_failed:{rel_path}")
+
+        # 4. 检查 ledger 行数变化（可观测性，不自动恢复）
+        ledger_snapshot_path = pre_dir / "ledger-snapshot.json"
+        if ledger_snapshot_path.exists():
+            ledger_pre = json.loads(ledger_snapshot_path.read_text(encoding="utf-8"))
+            for tbl, pre_info in ledger_pre.items():
+                try:
+                    current_cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]
+                    if current_cnt != pre_info.get("row_count", current_cnt):
+                        restored["ledger_warnings"].append(
+                            f"ledger_changed:{tbl}:pre={pre_info['row_count']}:now={current_cnt}"
+                        )
+                        logger.warning("ledger table %s changed during migration: %s -> %s", tbl, pre_info["row_count"], current_cnt)
+                except Exception as e:
+                    logger.warning("ledger check failed for %s: %s", tbl, e)
 
         # 更新 run 状态
         pg.execute(
-            "UPDATE migration_runs SET status=%s, completed_at=now() WHERE id=%s",
-            ("rolled_back", run_id),
+            "UPDATE migration_runs SET status=%s, completed_at=now(), metadata=coalesce(metadata,%s::jsonb) || %s::jsonb WHERE id=%s",
+            ("rolled_back", "{}", json.dumps({"rollback_restored": restored}, ensure_ascii=False), run_id),
         )
         pg.commit()
 
-    logger.info("rollback completed for run %s", run_id)
-    return {"status": "rolled_back", "run_id": run_id}
+    logger.info("rollback completed for run %s: restored=%s", run_id, restored)
+    return {"status": "rolled_back", "run_id": run_id, "restored": restored}
 
 
 # ─── List runs ───────────────────────────────────────────────────────────────
