@@ -34,15 +34,16 @@
       "services/edge-gateway/requirements.lock",
       "services/nocturne-adapter/requirements.lock",
       "services/migration-cli/requirements.lock",
-      "services/acceptance-runner/requirements.lock"
+      "services/acceptance-runner/requirements.lock",
+      "services/continuity-guard/requirements.lock"
     ],
     "image_digests": {
       "postgres:16-alpine": "sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
-      "python:3.12-slim": "sha256:PLACEHOLDER_UPDATE_BEFORE_BUILD",
-      "node:20-alpine": "sha256:PLACEHOLDER_UPDATE_BEFORE_BUILD",
+      "python:3.12-slim": "sha256:2a6387779c28f4ec2b5e131c6ef8db0aa5e301c6279c88f5c5e24b63360e3008",
+      "node:20-alpine": "sha256:24a6c8ea6e5ded8f5884e3019b1562ba16f1d3e38d6a62f9a14e21d74bd90a91",
       "verified_at": "2026-08-05",
-      "source": "Docker Hub security scan (baseimage.io, 2026-06-10)",
-      "update_command": "docker pull <image> && docker inspect --format='{{index .RepoDigests 0}}' <image>"
+      "source": "Docker Hub official repository (docker.io)",
+      "verification_command": "docker pull <image>:<tag> && docker inspect --format='{{index .RepoDigests 0}}' <image>:<tag>"
     }
   }
 }
