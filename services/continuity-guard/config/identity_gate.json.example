@@ -1,9 +1,11 @@
 {
   "schema_version": "1.0.0",
+  "core_instruction_path": "/config/core_instruction.md",
   "identity_bedrock_path": "/config/identity_bedrock.md",
   "identity_bedrock_hash": "",
+  "long_term_memory_path": "/config/long_term_memory.md",
   "recent_continuity_path": "/config/recent_continuity.md",
-  "system_instruction_path": "/config/system_instruction.md",
   "token_budget": 4000,
-  "bedrock_reserve_tokens": 800
+  "bedrock_reserve_tokens": 800,
+  "model_hard_limit": 8192
 }
