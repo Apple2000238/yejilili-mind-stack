@@ -300,3 +300,121 @@ jobs:
 **报告生成时间**：2026-08-04
 **生成者**：Kimi Work
 **仓库状态**：代码层核心功能已实现，运行层验证待执行
+
+
+---
+
+## 第四轮融合架构补充（2026-08-05）
+
+### 新增组件：Continuity Guard（融合层）
+
+服务路径：`services/continuity-guard/`
+
+#### A. 连续性清单与保护同步
+
+**文件**：`services/continuity-guard/src/manifest.py`
+
+| 要求 | 实现 | 证据 |
+|------|------|------|
+| `continuity_manifest.json` schema | ✅ `ManifestEntry` 数据类 | `schema_version`, `manifest_id`, `bucket_id`, `reason`, `protection`, `expected_source_ref`, `added_at`, `added_by`, `active` |
+| 清单是唯一保护策略来源 | ✅ `ManifestLoader` 加载并校验 | 必填字段检查、保护级别白名单 (`pinned`/`protected`)、唯一性约束 |
+| 同步是 YAML metadata 更新，非正文修改 | ✅ `ProtectionSynchronizer.sync()` | 只读取/写入 `metadata.yaml`，不碰 `content.md` |
+| 正文 hash 前后一致 | ✅ 同步前后计算 `content.md` SHA256 | 不一致时触发回滚并抛出 `CONTENT CORRUPTION DETECTED` |
+| 临时文件 + 原子替换 | ✅ `_write_yaml_metadata()` | `tempfile.mkstemp` → yaml dump → 回读校验 → `os.replace()` |
+| fail closed | ✅ bucket 不存在/source ref 不符/YAML 损坏/写入失败 | 全部返回 `success=False`，`sync_all()` 遇到失败立即停止 |
+| 回滚 metadata | ✅ `rollback_metadata()` | 根据审计记录恢复同步前 metadata |
+| 审计日志 | ✅ `_append_audit()` | 按日期分文件 JSONL，`guard-audit:/var/log/guard` |
+
+**数据库支撑**：`services/continuity-ledger/migrations/005_init_continuity_guard.sql`
+- `manifest_sync_audit` 表
+- `identity_assembly_audit` 表
+- `event_idempotency_log` / `event_idempotency_conflicts` 表
+- `dashboard_access_log` 表
+
+#### B. 身份门与 PromptPlan 装配
+
+**文件**：`services/continuity-guard/src/identity_gate.py`
+
+| 要求 | 实现 | 证据 |
+|------|------|------|
+| identity_bedrock 独立于 Context Envelope | ✅ 独立 `identity_bedrock_path` 配置 | 不从 Breath/心潮动态生成 |
+| 装配顺序固定 | ✅ `PromptPlanAssembler.assemble()` | 1.核心指令 2.identity_bedrock 3.记忆召回 4.recent_continuity 5.会话消息 |
+| 身份基岩不可截断 | ✅ 优先级 1，预算保护时永远保留 | `_truncate_to_budget()` 中 `tag == "identity_bedrock"` 直接保留 |
+| token 超预算先压缩近期材料 | ✅ 截断顺序：system_instruction → continuity_context | 预留 `bedrock_reserve_tokens` |
+| 配置缺失/错误/hash 不符 fail closed | ✅ `IdentityGateLoader.readiness()` | 返回 `(False, reason)`，HTTP 503 |
+| 装配审计 | ✅ `AssemblyRecord` + JSONL 日志 | 记录 section_id, source_ref, content_hash, token_budget |
+
+**配置示例**：`services/continuity-guard/config/identity_gate.json.example`
+
+#### C. 双向事件桥接（Nocturne ↔ 心潮）
+
+**文件**：`services/continuity-guard/src/event_bridge.py`
+
+| 要求 | 实现 | 证据 |
+|------|------|------|
+| 版本化 envelope | ✅ `EventEnvelope` 数据类 | `schema_version`, `event_id`, `correlation_id`, `causation_id`, `origin`, `event_type`, `occurred_at`, `received_at`, `namespace`, `derived_from`, `payload_hash`, `payload` |
+| drive_event_v2 → driveDeltas/satisfiedDrives/Weather | ✅ `NocturneToXinChaoTranslator.translate_drive_event()` | 结构化转换，不凭名称猜测 |
+| thoughts 始终为空数组 | ✅ `translate_memory_residue()` / `translate_dialogue_residue()` | 强制返回 `"thoughts": []` |
+| 用户对话触发 hold 后可结算一次 | ✅ `EventBridge.process_xinchao_event()` | `conversation_event` 类型处理 |
+| 桥接派生 hold 不反向触发 | ✅ `derived_from` 标记 + 回环抑制 | 桥接事件 `derived_from` 包含 `bridge:` 前缀 |
+| 心潮短态不直接写长期记忆 | ✅ `translate_state_change()` 返回 `action: "log_only"` | 不调用 Nocturne hold |
+| 梦境写入带 auto=True, source='xinchao-dream' | ✅ `translate_dream()` | 固定字段 + TTL |
+| 不同事件通道 | ✅ `XINCHAO_TO_NOCTURNE_TYPES` 分类 | `dream` / `conversation_event` / `state_change` |
+| 同一 event_id 只结算一次 | ✅ `IdempotencyStore.check_and_record()` | PostgreSQL 唯一约束 `event_id` |
+| 同一 event_id 不同 payload 冲突报警 | ✅ 比较 `payload_hash`，写入 `event_idempotency_conflicts` | `logger.error` + 冲突表记录 |
+| 回环抑制 | ✅ `LoopSuppressor.check()` | max_depth=3，检查 `derived_from` 深度和来源方向 |
+
+#### D. 回滚（快照恢复，禁止删除整个账本）
+
+**已有实现**：`services/migration-cli/src/main.py`
+
+| 要求 | 实现 | 证据 |
+|------|------|------|
+| 迁移前快照 | ✅ `snapshot_pre()` | Git commit, compose hash, schema hash, disk free |
+| manifest 记录文件路径/hash/权限 | ✅ `export_source()` | 每表 schema_hash, merkle_root, row_count |
+| 唯一 `migration_run_id` | ✅ 每次迁移 UUID | `run_id` 贯穿 snapshot/export/import/verify/rollback |
+| 按 run 精确识别 | ✅ `migration_runs` 表 + 六张投影表 | 所有投影数据带 `run_id` 字段 |
+| 逻辑回滚不删备份 | ✅ `rollback_run()` | 删除投影数据，保留 `source_records` 作为证据 |
+| 回滚只撤销目标 run | ✅ `DELETE ... WHERE run_id=%s` | 其他 run 数据不受影响 |
+| 恢复后校验 | ✅ `verify_run()` | source 行数 vs projection 行数，metadata 一致性 |
+| 备份加密 | ✅ `ops/backup-after-run.sh` | openssl AES-256-CBC + detached SHA256 |
+
+#### E. Dashboard 白名单只读投影
+
+**文件**：`services/continuity-guard/src/dashboard.py`
+
+| 要求 | 实现 | 证据 |
+|------|------|------|
+| 白名单 DTO | ✅ `@dataclass` DTO 类 | `BreathResultDTO`, `DimensionSnapshotDTO`, `ThoughtMetaDTO` 等 |
+| 不返回聊天正文 | ✅ DTO 只含 source_refs/summary/meta | 无 `content` 原始字段 |
+| 不返回 persona 原文 | ✅ 无身份相关接口 | Dashboard 只展示结构和元数据 |
+| 不返回 secret | ✅ 只读聚合，不接触 secrets | 独立最小权限鉴权 |
+| 只读 | ✅ 所有 `/dashboard/*` 路由为 GET | 无写操作 |
+| 鉴权 | ✅ `_dashboard_auth()` + constant-time comparison | SHA256(token) 比对 |
+
+### 新增测试
+
+| 测试文件 | 覆盖场景 | 数量 |
+|---------|---------|------|
+| `tests/unit/test_continuity_guard.py` | Manifest 加载校验、保护同步、身份门装配 | 10+ |
+| `tests/unit/test_event_bridge.py` | Envelope、转换规则、回环抑制 | 12+ |
+
+### Docker Compose 更新
+
+- 新增 `guard-audit` 命名卷
+- 新增 `continuity-guard` 服务（port 8003，依赖 ledger）
+- 配置挂载：`/config` 只读挂载 continuity_manifest.json、identity_gate.json
+
+### 合成示例文件（不含真实数据）
+
+- `services/continuity-guard/config/continuity_manifest.json.example`
+- `services/continuity-guard/config/identity_gate.json.example`
+- `services/continuity-guard/config/identity_bedrock.md.example`
+
+**明确确认**：仓库不含任何真实身份、关系、聊天、生产数据或凭据。
+
+---
+
+**报告更新时间**：2026-08-05
+**生成者**：Kimi Work
+**仓库状态**：第四轮五大架构要求代码层已实现，运行层验证待执行
