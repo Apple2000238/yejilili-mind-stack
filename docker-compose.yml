@@ -30,6 +30,8 @@ secrets:
     file: ./secrets/openai_api_key.txt
   anthropic_api_key:
     file: ./secrets/anthropic_api_key.txt
+  service_token:
+    file: ./secrets/service_token.txt
   admin_token:
     file: ./secrets/admin_token.txt
 
@@ -79,7 +81,7 @@ services:
       OMBRE_PORT: "8000"
       OMBRE_TRANSPORT: streamable-http
     volumes:
-      - nocturne-data:/data/buckets
+      - nocturne-data:/app/buckets
       - ./upstream/nocturne-memory-core:/app:ro
       - type: tmpfs
         target: /tmp
@@ -204,10 +206,13 @@ services:
     restart: unless-stopped
     read_only: true
     environment:
-      XINCHAO_PORT: "3000"
-      OMBRE_MCP_URL: "http://nocturne-adapter:8001/mcp"
-      XINCHAO_OMBRE_TOKEN_FILE: /run/secrets/mcp_adapter_token
+      PORT: "3000"
+      STATE_PATH: /data/state/state.json
+      TRANSITION_JOURNAL_PATH: /data/state/transitions.jsonl
+      SERVICE_TOKEN_FILE: /run/secrets/service_token
+      OMBRE_MCP_TOKEN_FILE: /run/secrets/mcp_adapter_token
     secrets:
+      - service_token
       - mcp_adapter_token
     volumes:
       - xinchao-data:/data/state

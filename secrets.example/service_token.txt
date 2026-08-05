@@ -1,0 +1,13 @@
+# service_token — XinChao 服务间鉴权
+#
+# 用途：XinChao 与 Nocturne Adapter 之间的服务间认证 Bearer token
+# 长度建议 ≥ 32 位随机字符
+# 生成命令：openssl rand -hex 32
+#
+# 注意：
+# - 此文件用于本地/测试环境，生产环境应使用更强的密钥管理
+# - 空值会导致 xinchao 启动时认证失败，无法与 adapter 通信
+# - 必须与 adapter 侧配置的 token 保持一致
+
+# 替换下方占位符后删除本注释行
+replace-with-your-service-token-min-32-chars

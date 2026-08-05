@@ -1,0 +1,13 @@
+# admin_token — Edge Gateway 管理接口鉴权
+#
+# 用途：/v1/switch-provider 等管理接口的 Bearer token
+# 长度建议 ≥ 32 位随机字符
+# 生成命令：openssl rand -hex 32
+#
+# 注意：
+# - 此文件用于本地/测试环境，生产环境应使用更强的密钥管理
+# - 空值或占位符会导致 edge-gateway 启动时鉴权检查日志告警（但不会阻断启动）
+# - 如不需要管理接口鉴权，可保留为空字符串（仅限测试/开发）
+
+# 替换下方占位符后删除本注释行
+replace-with-your-admin-token-or-leave-empty-for-testing

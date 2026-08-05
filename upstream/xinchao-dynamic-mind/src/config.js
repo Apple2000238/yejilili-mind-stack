@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 function bool(name, fallback = false) {
   const raw = process.env[name];
   return raw == null ? fallback : ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
@@ -9,13 +11,35 @@ function number(name, fallback, min, max) {
   return Math.max(min, Math.min(max, parsed));
 }
 
+/**
+ * 读取环境变量，支持 `_FILE` 后缀从 Docker Secret 文件读取。
+ * 优先级：name 直接值 > name_FILE 文件内容 > fallback
+ * 文件读取失败时抛出明确错误（不含敏感内容）。
+ */
+function env(name, fallback = '') {
+  const direct = process.env[name];
+  if (direct != null) return direct;
+
+  const fileVar = process.env[`${name}_FILE`];
+  if (fileVar) {
+    try {
+      return readFileSync(fileVar, 'utf8').trim();
+    } catch (err) {
+      throw new Error(
+        `Failed to read secret file for ${name}: ${err.code ?? err.message}`
+      );
+    }
+  }
+  return fallback;
+}
+
 export function loadConfig() {
   const agentName = process.env.AGENT_NAME ?? 'AI 助手';
   const notificationRecipient = process.env.NOTIFICATION_RECIPIENT ?? '用户';
   return {
     identity: { agentName, notificationRecipient },
     port: number('PORT', 18110, 1, 65535),
-    serviceToken: process.env.SERVICE_TOKEN ?? '',
+    serviceToken: env('SERVICE_TOKEN', ''),
     statePath: process.env.STATE_PATH ?? '/app/state/state.json',
     journalPath: process.env.TRANSITION_JOURNAL_PATH ?? '/app/state/transitions.jsonl',
     settleIntervalMinutes: number('SETTLE_INTERVAL_MINUTES', 15, 1, 1440),
@@ -37,7 +61,7 @@ export function loadConfig() {
     dreamMaxPerDay: number('DREAM_MAX_PER_DAY', 4, 1, 12),
     ombre: {
       url: process.env.OMBRE_MCP_URL ?? '',
-      token: process.env.OMBRE_MCP_TOKEN ?? '',
+      token: env('OMBRE_MCP_TOKEN', ''),
       readEnabled: bool('OMBRE_READ_ENABLED', false),
       writeEnabled: bool('OMBRE_WRITE_ENABLED', false),
       breathMaxResults: number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10),
