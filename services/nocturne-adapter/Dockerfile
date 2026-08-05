@@ -1,6 +1,6 @@
 # Python 3.12 slim — digest 需在构建前通过以下命令更新：
 #   docker pull python:3.12-slim && docker inspect --format='{{index .RepoDigests 0}}' python:3.12-slim
-FROM python:3.12-slim@sha256:PLACEHOLDER_UPDATE_BEFORE_BUILD
+FROM python:3.12-slim@sha256:2a6387779c28f4ec2b5e131c6ef8db0aa5e301c6279c88f5c5e24b63360e3008
 
 WORKDIR /app
 

@@ -1,6 +1,6 @@
 # Node 20 alpine — digest 需在构建前通过以下命令更新：
 #   docker pull node:20-alpine && docker inspect --format='{{index .RepoDigests 0}}' node:20-alpine
-FROM node:20-alpine@sha256:PLACEHOLDER_UPDATE_BEFORE_BUILD
+FROM node:20-alpine@sha256:24a6c8ea6e5ded8f5884e3019b1562ba16f1d3e38d6a62f9a14e21d74bd90a91
 
 WORKDIR /app
 COPY package.json ./
