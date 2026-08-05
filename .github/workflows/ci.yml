@@ -65,12 +65,7 @@ jobs:
           pip install -r services/edge-gateway/requirements.lock
           pip install -r services/migration-cli/requirements.lock
           pip install -r services/acceptance-runner/requirements.lock
-          pip install pytest pytest-asyncio httpx
-        run: |
-          pip install -r services/nocturne-adapter/requirements.txt
-          pip install -r services/edge-gateway/requirements.txt
-          pip install -r services/migration-cli/requirements.txt
-          pip install -r services/acceptance-runner/requirements.txt
+          pip install -r services/continuity-guard/requirements.lock
           pip install pytest pytest-asyncio httpx
       - name: Run unit tests
         run: pytest tests/unit -v
@@ -78,12 +73,12 @@ jobs:
         run: pytest tests/contract -v
       - name: Upload test results
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: pytest-results
           path: |
             .pytest_cache/v/cache/
             reports/
-        if: always()
 
   # ─── Nocturne Upstream Regression ───────────────────────────────────────────
   nocturne-regression:
