@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project": "yejilili-mind-stack",
-  "generated_at": "2026-08-03T22:20:00+08:00",
+  "generated_at": "2026-08-05T00:00:00+08:00",
   "fixed_upstreams": [
     {
       "name": "Nocturne Memory Core",
@@ -29,17 +29,20 @@
   ],
   "dependency_locking": {
     "python_version": "3.12",
-    "node_version": "22",
+    "node_version": "20",
     "lock_files": [
-      "services/edge-gateway/requirements.txt",
-      "services/nocturne-adapter/requirements.txt",
-      "services/migration-cli/requirements.txt",
-      "services/acceptance-runner/requirements.txt"
+      "services/edge-gateway/requirements.lock",
+      "services/nocturne-adapter/requirements.lock",
+      "services/migration-cli/requirements.lock",
+      "services/acceptance-runner/requirements.lock"
     ],
     "image_digests": {
       "postgres:16-alpine": "sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777",
-      "verified_at": "2026-08-04",
-      "source": "Docker Hub security scan (baseimage.io, 2026-06-10)"
+      "python:3.12-slim": "sha256:PLACEHOLDER_UPDATE_BEFORE_BUILD",
+      "node:20-alpine": "sha256:PLACEHOLDER_UPDATE_BEFORE_BUILD",
+      "verified_at": "2026-08-05",
+      "source": "Docker Hub security scan (baseimage.io, 2026-06-10)",
+      "update_command": "docker pull <image> && docker inspect --format='{{index .RepoDigests 0}}' <image>"
     }
   }
 }

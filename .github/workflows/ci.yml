@@ -61,6 +61,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
+          pip install -r services/nocturne-adapter/requirements.lock
+          pip install -r services/edge-gateway/requirements.lock
+          pip install -r services/migration-cli/requirements.lock
+          pip install -r services/acceptance-runner/requirements.lock
+          pip install pytest pytest-asyncio httpx
+        run: |
           pip install -r services/nocturne-adapter/requirements.txt
           pip install -r services/edge-gateway/requirements.txt
           pip install -r services/migration-cli/requirements.txt
@@ -121,6 +127,46 @@ jobs:
         run: |
           cd upstream/xinchao-dynamic-mind
           npm test
+
+  # ─── Supply Chain / Manifest Consistency ────────────────────────────────────
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Dockerfile uses requirements.lock
+        run: |
+          FAILED=0
+          for f in $(find services -name Dockerfile); do
+            if grep -q 'requirements\.txt' "$f"; then
+              echo "ERROR: $f still references requirements.txt (should use requirements.lock)"
+              FAILED=1
+            fi
+            if ! grep -q 'requirements\.lock' "$f"; then
+              echo "ERROR: $f does not reference requirements.lock"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+      - name: Check no PLACEHOLDER digests in Dockerfiles
+        run: |
+          FAILED=0
+          for f in $(find . -name Dockerfile -not -path './.git/*'); do
+            if grep -q 'PLACEHOLDER_UPDATE_BEFORE_BUILD' "$f"; then
+              echo "ERROR: $f contains PLACEHOLDER digest. Run ops/update-image-digests.sh"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+      - name: Check THIRD_PARTY_MANIFEST matches Dockerfiles
+        run: |
+          # Node version consistency
+          MANIFEST_NODE=$(jq -r '.dependency_locking.node_version' THIRD_PARTY_MANIFEST.json)
+          DOCKERFILE_NODE=$(grep -oE 'node:[0-9]+' upstream/xinchao-dynamic-mind/Dockerfile | head -1 | cut -d: -f2)
+          if [[ "$MANIFEST_NODE" != "$DOCKERFILE_NODE" ]]; then
+            echo "ERROR: THIRD_PARTY_MANIFEST node_version ($MANIFEST_NODE) != Dockerfile ($DOCKERFILE_NODE)"
+            exit 1
+          fi
+          echo "  ✓ Node version consistent: $MANIFEST_NODE"
 
   # ─── Security Scan ──────────────────────────────────────────────────────────
   security-scan:
