@@ -39,6 +39,8 @@ secrets:
 services:
   # ─── Continuity Ledger ──────────────────────────────────────────────────────
   continuity-ledger:
+    # 镜像 digest 锁定（postgres:16-alpine, 2026-06 security-scan verified）
+    # 获取命令: docker pull postgres:16-alpine && docker inspect --format='{{index .RepoDigests 0}}' postgres:16-alpine
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     container_name: yjll-postgres
     restart: unless-stopped
@@ -68,6 +70,7 @@ services:
           cpus: "1.0"
 
   # ─── Nocturne（上游固定快照，只读挂载源码）────────────────────────────────────
+  # ⚠️ 需先执行: ./ops/import-upstream.sh 导入固定快照源码
   nocturne:
     build:
       context: ./upstream/nocturne-memory-core
@@ -95,6 +98,7 @@ services:
         limits:
           memory: 1.5G
           cpus: "1.0"
+    # 不声明 ports，不加入 public 网络
 
   # ─── Nocturne Adapter（兼容适配层）────────────────────────────────────────────
   nocturne-adapter:
@@ -194,6 +198,7 @@ services:
           cpus: "0.5"
 
   # ─── XinChao（上游固定快照）───────────────────────────────────────────────────
+  # ⚠️ 需先执行: ./ops/import-upstream.sh 导入固定快照源码
   xinchao:
     build:
       context: ./upstream/xinchao-dynamic-mind
@@ -278,13 +283,17 @@ services:
       GUARD_AUDIT_DIR: /var/log/guard
       CONTINUITY_MANIFEST_PATH: /config/continuity_manifest.json
       IDENTITY_GATE_CONFIG_PATH: /config/identity_gate.json
-      POSTGRES_DSN: "postgresql://continuity@continuity-ledger:5432/continuity_ledger"
+      POSTGRES_HOST: continuity-ledger
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: continuity_ledger
+      POSTGRES_USER: continuity
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
     secrets:
       - postgres_password
       - admin_token
     volumes:
+      - nocturne-data:/data/buckets:ro
       - guard-audit:/var/log/guard
       - ./services/continuity-guard/config:/config:ro
       - type: tmpfs
