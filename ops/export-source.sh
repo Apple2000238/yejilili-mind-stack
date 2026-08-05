@@ -17,7 +17,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$SOURCE_DB" ]] || [[ -z "$RUN_ID" ]]; then
+if [[ -z "${SOURCE_DB:-}" ]] || [[ -z "${RUN_ID:-}" ]]; then
     echo "ERROR: --source-db and --run-id required" >&2
     exit 1
 fi
@@ -42,11 +42,22 @@ if [[ "$SOURCE_DB" == "/opt/afterrain-api"* ]]; then
     exit 1
 fi
 
+# 校验 SQLite 可读性
+if ! file "$SOURCE_DB" | grep -qi sqlite; then
+    echo "ERROR: source db does not appear to be a SQLite database: $SOURCE_DB" >&2
+    exit 1
+fi
+
+# 容器内挂载路径（只读）
+CONTAINER_DB_PATH="/tmp/source.db"
+
 echo "{\"phase\":\"export\",\"source_db\":\"$SOURCE_DB\",\"run_id\":\"$RUN_ID\",\"status\":\"running\"}"
 
-# 调用 migration-cli export-source
-docker compose --profile migration run --rm migration-cli \
-    python -m src.main export-source --source-db "$SOURCE_DB" --run-id "$RUN_ID" || {
+# 调用 migration-cli export-source，通过 -v 将宿主文件只读挂载到容器
+docker compose --profile migration run --rm \
+    -v "$SOURCE_DB:$CONTAINER_DB_PATH:ro" \
+    migration-cli \
+    python -m src.main export-source --source-db "$CONTAINER_DB_PATH" --run-id "$RUN_ID" || {
     echo "{\"phase\":\"export\",\"run_id\":\"$RUN_ID\",\"status\":\"FAIL\"}"
     exit 1
 }
