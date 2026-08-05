@@ -1,2 +1,12 @@
-# Placeholder for Docker Secret: LLM Provider API Key
-# Replace with actual staging provider key when ready
+# DEPRECATED — 此文件不再被当前 Compose 配置引用
+#
+# 历史用途：早期版本曾将 provider_api_key 作为单一 LLM provider 密钥使用。
+# 当前架构已拆分为：
+#   - openai_api_key.txt  → Edge Gateway OpenAI provider
+#   - anthropic_api_key.txt → Edge Gateway Anthropic provider
+#   - mcp_adapter_token.txt → Nocturne Adapter MCP 鉴权
+#
+# 保留原因：兼容旧版 secret 目录结构，避免已有部署脚本报错。
+# 新部署无需创建此文件。
+#
+# 清理计划：v2.0 版本将彻底移除此文件及所有引用。

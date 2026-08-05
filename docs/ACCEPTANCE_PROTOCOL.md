@@ -4,54 +4,67 @@
 验证 XinChao → Nocturne 连续性迁移后，核心契约保持完整。
 
 ## 测试环境
-- Docker Compose staging 栈（全部 7 服务）
+- Docker Compose staging 栈（全部 7 个服务）
 - Mock provider 作为 LLM 后端
 - 空数据库（每次验收前 `docker compose down -v` 重建）
 
 ## 验收用例
 
-### AC-1: Adapter breath 路由正确
-**Given**: XinChao 调用 `breath(query="感情", max_results=5)`
-**Then**: adapter 路由到 `nocturne.trace("感情", limit=5)`
-**And**: provenance 表记录 route="trace", query_honored=true
+### AC-1: 服务健康检查
+**Given**: staging 栈已启动  
+**When**: 访问 gateway `/health` 和 adapter `/health`  
+**Then**: 两者均返回 HTTP 200  
+**And**: 响应体包含预期的健康状态字段
 
-### AC-2: Adapter breath 零参路由正确
-**Given**: XinChao 调用 `breath()`（空 query）
-**Then**: adapter 路由到 `nocturne.breath()`（零参数）
-**And**: provenance 表记录 route="breath"
+### AC-2: MCP 工具列表与 Schema
+**Given**: adapter 已启动且 MCP token 有效  
+**When**: POST `/mcp` {"jsonrpc":"2.0","method":"tools/list"}  
+**Then**: 返回 tools 列表包含 `breath` 和 `hold`  
+**And**: `hold` 的 inputSchema 包含 `auto` 和 `source` 字段
 
-### AC-3: Adapter hold 物化 tags
-**Given**: XinChao 调用 `hold(content="测试", auto=true, source="xinchao-dream")`
-**Then**: 实际写入 Nocturne 的 tags 包含 `origin:xinchao`、`source:xinchao-dream`、`auto:true`
-**And**: provenance 表记录 source="xinchao-dream", auto=true
+### AC-3: breath query 路由与截断
+**Given**: adapter 的 MCP tools/call 接口可用  
+**When**: 调用 `breath(query="感情", max_results=5, max_tokens=1000)`  
+**Then**: 带 query 时路由为 `trace`  
+**And**: 空 query 时路由为 `breath`  
+**And**: metadata 包含 `route` 和 `query_honored` 字段
 
-### AC-4: Adapter hold 幂等性
-**Given**: 同一 content + tags + source 调用 hold 两次
-**Then**: 第二次返回 idempotent 标记
-**AND**: Nocturne 只写入一次
+### AC-4: hold 幂等性与 Provenance
+**Given**: 调用 `hold(content="acceptance test memory", tags="test,acceptance", importance=3, auto=True, source="xinchao-dream")`  
+**When**: 使用相同 payload 再次调用  
+**Then**: 两次返回相同的 `target_ref`  
+**And**: provenance 不重复写入
 
-### AC-5: Edge Gateway mock provider 确定性
-**Given**: 向 edge-gateway 发送相同 prompt 两次
-**Then**: mock provider 返回相同 content hash
-**And**: 响应格式符合 OpenAI chat.completion schema
+### AC-5: 网络隔离
+**Given**: staging 栈的网络配置  
+**Then**: Nocturne (port 8000) 不暴露公网端口  
+**And**: adapter (port 8001) 是唯一能访问 Nocturne 的路径  
+**And**: gateway (port 8002) 从内部网络可达
 
-### AC-6: Edge Gateway provider 热切换
-**Given**: 当前 provider = mock
-**When**: POST /v1/switch-provider {"provider": "openai"}
-**Then**: 后续请求路由到 OpenAI provider（若配置了 key）
-**And**: health 端点返回 current_provider="openai"
+### AC-6: OpenAI/Anthropic 协议兼容
+**Given**: edge-gateway 已启动  
+**When**: POST `/v1/chat/completions`（OpenAI 格式）  
+**And**: POST `/v1/messages`（Anthropic 格式）  
+**Then**: OpenAI 响应包含 `choices` 和 `usage`  
+**And**: Anthropic 响应包含 `content` 或兼容结构
 
-### AC-7: 数据库迁移幂等
-**Given**: 执行 migrations 两次
-**Then**: 第二次无报错
-**And**: 所有 `IF NOT EXISTS` 生效，无重复表
+### AC-7: 会话 ID 稳定性
+**Given**: edge-gateway 已启动  
+**When**: 使用相同 `session_id` 发送两次请求  
+**To**: `/v1/chat/completions` 和 `/v1/messages`  
+**Then**: 两次请求均返回 HTTP 200（无 500 错误）  
+**And**: session 映射保持一致
 
-### AC-8: 网络隔离
-**Given**: 从 public 网络外部访问
-**Then**: 只能访问 edge-gateway:8080
-**And**: 无法直接访问 nocturne:8000、adapter:8001、postgres:5432
+### AC-8: 日志脱敏
+**Given**: adapter 的审计日志目录 `/var/log/adapter` 已挂载  
+**When**: 检查 `*.log` 文件内容  
+**Then**: 日志中不得出现 `Authorization`、`Bearer `、原始聊天内容、`secret`、`api_key` 等敏感模式  
+**And**: 环境变量中不得泄露 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`MCP_ADAPTER_TOKEN`
+
+> **注意**：若 `/var/log/adapter` 目录不存在或为空，视为审计基础设施缺失，AC-8 标记为失败。
 
 ## 执行命令
+
 ```bash
 docker compose down -v
 docker compose up -d
@@ -59,6 +72,7 @@ docker compose --profile acceptance run --rm acceptance-runner
 ```
 
 ## 通过标准
-- 全部 8 个用例通过
+- 全部 8 个用例通过（`passed == True`）
 - 无 ERROR 级别日志
-- provenance 表无 failed 状态记录（除故意测试的异常用例外）
+- 验收报告 JSON 和 Markdown 写入 `/artifacts/`
+- AC-8 中 audit 日志目录必须存在且非空

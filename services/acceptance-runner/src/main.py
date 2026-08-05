@@ -371,21 +371,34 @@ def ac7_session_stability(report: AcceptanceReport) -> None:
 # ─── AC-8: 日志脱敏 ──────────────────────────────────────────────────────────
 
 def ac8_log_sanitization(report: AcceptanceReport) -> None:
-    """AC-8: 日志中不得出现 secret 值、聊天原文或 Authorization header。"""
-    # 读取 adapter audit 日志（如果挂载了）
+    """AC-8: 日志中不得出现 secret 值、聊天原文或 Authorization header。
+    
+    要求：audit 日志目录必须存在且至少包含一个日志文件。
+    若目录不存在或为空，视为审计基础设施缺失，标记失败。
+    """
     audit_dir = Path("/var/log/adapter")
-    passed = True
     findings = []
-
     sensitive_patterns = ["Authorization", "Bearer ", "xinchao-dream", "secret", "api_key"]
 
-    if audit_dir.exists():
-        for log_file in audit_dir.glob("*.log"):
-            text = log_file.read_text(encoding="utf-8", errors="replace")
-            for pattern in sensitive_patterns:
-                if pattern in text:
-                    findings.append(f"{log_file.name}: found '{pattern}'")
-                    passed = False
+    # 前置检查：audit 目录必须存在
+    if not audit_dir.exists():
+        findings.append("audit_dir_missing: /var/log/adapter does not exist (audit infrastructure not mounted)")
+        report.add("AC-8", "Log Sanitization", False, {"findings": findings, "checked_patterns": sensitive_patterns})
+        return
+
+    log_files = list(audit_dir.glob("*.log"))
+    if not log_files:
+        findings.append("audit_dir_empty: /var/log/adapter exists but contains no *.log files")
+        report.add("AC-8", "Log Sanitization", False, {"findings": findings, "checked_patterns": sensitive_patterns})
+        return
+
+    passed = True
+    for log_file in log_files:
+        text = log_file.read_text(encoding="utf-8", errors="replace")
+        for pattern in sensitive_patterns:
+            if pattern in text:
+                findings.append(f"{log_file.name}: found '{pattern}'")
+                passed = False
 
     # 同时检查环境变量是否泄露到日志
     env_dump = json.dumps(dict(os.environ), default=str)

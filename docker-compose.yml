@@ -277,6 +277,13 @@ services:
     environment:
       GATEWAY_URL: "http://edge-gateway:8002"
       ADAPTER_URL: "http://nocturne-adapter:8001"
+      MCP_TOKEN_FILE: /run/secrets/mcp_adapter_token
+    secrets:
+      - mcp_adapter_token
+    volumes:
+      - staging-artifacts:/artifacts
+      - type: tmpfs
+        target: /tmp
     networks:
       - mind
     depends_on:
