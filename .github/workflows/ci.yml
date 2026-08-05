@@ -19,10 +19,33 @@ jobs:
           else
             echo "shellcheck not available, skipping"
           fi
+      - name: Bash syntax check
+        run: |
+          FAILED=0
+          for f in $(find ops -name '*.sh'); do
+            if ! bash -n "$f"; then
+              echo "Syntax error: $f"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+      - name: Python syntax check
+        run: |
+          FAILED=0
+          for f in $(find services -name '*.py'); do
+            if ! python3 -m py_compile "$f"; then
+              echo "Syntax error: $f"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
       - name: YAML lint
         run: |
           pip install yamllint
-          yamllint docker-compose.yml || true
+          yamllint docker-compose.yml
+      - name: Compose config validation
+        run: |
+          docker compose config
 
   # ─── Unit / Contract Tests ──────────────────────────────────────────────────
   unit-contract:
@@ -44,9 +67,17 @@ jobs:
           pip install -r services/acceptance-runner/requirements.txt
           pip install pytest pytest-asyncio httpx
       - name: Run unit tests
-        run: pytest tests/unit -v || true
+        run: pytest tests/unit -v
       - name: Run contract tests
-        run: pytest tests/contract -v || true
+        run: pytest tests/contract -v
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: |
+            .pytest_cache/v/cache/
+            reports/
+        if: always()
 
   # ─── Nocturne Upstream Regression ───────────────────────────────────────────
   nocturne-regression:
@@ -64,11 +95,11 @@ jobs:
       - name: Run Nocturne tests
         run: |
           cd upstream/nocturne-memory-core
-          python -m pytest -q --asyncio-mode=auto || true
+          python -m pytest -q --asyncio-mode=auto
       - name: Run public audit
         run: |
           cd upstream/nocturne-memory-core
-          python scripts/public_audit.py || true
+          python scripts/public_audit.py
 
   # ─── XinChao Upstream Regression ────────────────────────────────────────────
   xinchao-regression:
@@ -85,24 +116,11 @@ jobs:
       - name: Install XinChao dependencies
         run: |
           cd upstream/xinchao-dynamic-mind
-          npm install || true
+          npm install
       - name: Run XinChao tests
         run: |
           cd upstream/xinchao-dynamic-mind
-          npm test || true
-
-  # ─── Compose Config Validation ──────────────────────────────────────────────
-  compose-config:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate Compose
-        run: |
-          if command -v docker-compose >/dev/null 2>&1; then
-            docker-compose config
-          else
-            echo "docker-compose not available, manual validation required"
-          fi
+          npm test
 
   # ─── Security Scan ──────────────────────────────────────────────────────────
   security-scan:
@@ -114,9 +132,9 @@ jobs:
           # 基本检查：确保没有明文密钥
           grep -rE '(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{30,}|api[_-]?key.*=.*[^${])' . \
             --include='*.py' --include='*.yml' --include='*.yaml' --include='*.json' \
-            --exclude-dir=.git --exclude-dir=upstream || true
+            --exclude-dir=.git --exclude-dir=upstream
       - name: Bandit scan (Python)
         run: |
           pip install bandit
-          bandit -r services/ -f json -o bandit-report.json || true
-          cat bandit-report.json || true
+          bandit -r services/ -f json -o bandit-report.json
+          cat bandit-report.json

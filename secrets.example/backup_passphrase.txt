@@ -1,0 +1,13 @@
+# backup_passphrase — 备份加密密码
+#
+# 用途：ops/backup-after-run.sh 和 ops/recovery-drill.sh 的加密/解密密码
+# 长度建议 ≥ 32 位随机字符
+# 生成命令：openssl rand -hex 32
+#
+# 注意：
+# - 此文件用于本地/测试环境，生产环境应使用更强的密钥管理
+# - 丢失此密码将导致备份永久不可恢复
+# - 权限必须为 600
+
+# 替换下方占位符后删除本注释行
+replace-with-32-char-passphrase-minimum
