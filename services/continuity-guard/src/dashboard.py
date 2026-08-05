@@ -314,7 +314,8 @@ class DashboardService:
         """获取桥接健康状态（从数据库读取真实统计）。"""
         try:
             with self._get_pg() as pg:
-                # 最近 1 小时的统计
+                results = []
+                # 最近 1 小时的统计 — 分别查询两条桥
                 for bridge_name, origin_filter in [
                     ("nocturne-to-xinchao", "nocturne"),
                     ("xinchao-to-nocturne", "xinchao"),
@@ -324,7 +325,7 @@ class DashboardService:
                         SELECT
                             COUNT(*) FILTER (WHERE status = 'completed') AS completed,
                             COUNT(*) FILTER (WHERE status = 'failed') AS failed,
-                            COUNT(*) FILTER (WHERE status = 'loop_suppressed') AS loop_suppressed,
+                            COUNT(*) FILTER (WHERE status = 'failed' AND error LIKE '%loop%') AS loop_suppressed,
                             MAX(updated_at) AS last_event
                         FROM event_inbox
                         WHERE origin = %s
@@ -346,7 +347,7 @@ class DashboardService:
                     else:
                         status = "healthy"
 
-                    return [
+                    results.append(
                         BridgeHealthDTO(
                             bridge_name=bridge_name,
                             status=status,
@@ -355,11 +356,8 @@ class DashboardService:
                             loop_suppressed_1h=loop,
                             last_event_at=str(last_event) if last_event else None,
                         ).to_dict()
-                        for bridge_name, origin_filter in [
-                            ("nocturne-to-xinchao", "nocturne"),
-                            ("xinchao-to-nocturne", "xinchao"),
-                        ]
-                    ]
+                    )
+                return results
         except Exception as e:
             logger.warning("bridge_health query failed: %s", e)
 

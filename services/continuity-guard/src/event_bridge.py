@@ -364,6 +364,20 @@ class PersistentEventStore:
                     (worker_id, event_id, self.claim_timeout),
                 ).fetchone()
 
+            if not result:
+                # 尝试 claim 超时的 claimed 事件（claimed→processing 间崩溃恢复）
+                result = pg.execute(
+                    """
+                    UPDATE event_inbox
+                    SET status='claimed', claimed_at=now(), claimed_by=%s,
+                        attempt=attempt+1, updated_at=now()
+                    WHERE event_id=%s AND status='claimed'
+                        AND updated_at < now() - interval '%s seconds'
+                    RETURNING *
+                    """,
+                    (worker_id, event_id, self.claim_timeout),
+                ).fetchone()
+
             pg.commit()
             return dict(result) if result else None
 
@@ -447,30 +461,54 @@ class LoopSuppressor:
         return len(parts)
 
     def _check_causation_loop(self, envelope: EventEnvelope) -> tuple[bool, str]:
-        """检查 causation_id 是否形成循环。
+        """检查 causation 链是否形成循环。
 
-        查询数据库中 correlation_id 相同的链，检查 causation_id 是否已出现过。
+        从当前事件的 causation_id 开始回溯，检查当前 event_id 是否出现在
+        自己的祖先链中（形成闭环）。同时检测重复访问（另一形式的循环）。
         """
         if not envelope.correlation_id or not envelope.causation_id:
             return True, "no_causation_chain"
 
         try:
             with self._get_pg() as pg:
-                # 检查 causation_id 是否已在该 correlation 链中作为 event_id 出现过
-                existing = pg.execute(
-                    """
-                    SELECT 1 FROM event_causation_chain
-                    WHERE correlation_id = %s AND event_id = %s
-                    LIMIT 1
-                    """,
-                    (envelope.correlation_id, envelope.causation_id),
-                ).fetchone()
-                if existing:
-                    return False, f"causation_loop_detected: {envelope.causation_id} already in chain"
-        except Exception as e:
-            logger.warning("causation loop check failed: %s", e)
+                current = envelope.causation_id
+                visited = set()
+                max_hops = self.max_depth * 2  # 安全上限
 
-        return True, "ok"
+                for _ in range(max_hops):
+                    if not current:
+                        return True, "chain_terminates"
+
+                    # 如果回溯到当前事件自身，说明形成闭环
+                    if current == envelope.event_id:
+                        return False, f"causation_loop_detected: event_id={envelope.event_id} in its own ancestry"
+
+                    if current in visited:
+                        return False, f"causation_loop_detected: cycle at {current}"
+
+                    visited.add(current)
+
+                    # 查找 current 作为 event_id 的记录的 causation_id
+                    row = pg.execute(
+                        """
+                        SELECT causation_id FROM event_causation_chain
+                        WHERE correlation_id = %s AND event_id = %s
+                        LIMIT 1
+                        """,
+                        (envelope.correlation_id, current),
+                    ).fetchone()
+
+                    if not row:
+                        return True, "chain_terminates"
+
+                    current = row["causation_id"]
+
+                # 超过安全上限，视为可能循环
+                return False, f"hop_limit_exceeded: possible loop after {max_hops} hops"
+        except Exception as e:
+            logger.error("causation loop check failed: %s", e)
+            # 数据库异常时 fail-closed：拒绝放行
+            return False, f"check_failed: {e}"
 
     def check(self, envelope: EventEnvelope) -> tuple[bool, str]:
         """检查是否会导致回环。"""
