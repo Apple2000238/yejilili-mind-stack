@@ -4,8 +4,10 @@ Schema 定义、加载器、校验器、同步与审计。
 
 纪律：
     - 清单是保护策略的唯一配置来源
-    - 同步属于受审计的 YAML metadata 更新，不是正文修改
+    - 缺失、损坏或 schema 不兼容时必须 fail closed
+    - 同步属于受审计的受控 metadata 更新，不是正文修改
     - 正文 hash 必须前后一致
+    - 使用 Nocturne 原生 Markdown + YAML frontmatter 格式
     - fail closed：任何异常都不继续
 """
 
@@ -127,30 +129,56 @@ class ManifestLoader:
         self.manifest_path = Path(manifest_path)
         self._entries: list[ManifestEntry] = []
         self._loaded = False
+        self._load_error: str | None = None
 
     def load(self) -> list[ManifestEntry]:
-        """加载清单文件，校验 schema，返回条目列表。"""
+        """加载清单文件，校验 schema，返回条目列表。
+
+        失败时记录错误并返回空列表（调用方应检查 readiness）。
+        """
         if self._loaded:
             return self._entries
 
         if not self.manifest_path.exists():
-            logger.warning("manifest file not found: %s", self.manifest_path)
+            self._load_error = f"manifest file not found: {self.manifest_path}"
+            logger.error(self._load_error)
             self._loaded = True
             return []
 
-        raw = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            self._load_error = f"manifest JSON parse error: {e}"
+            logger.error(self._load_error)
+            self._loaded = True
+            return []
 
         # 顶层校验
         if not isinstance(raw, dict):
-            raise ValueError("manifest root must be an object")
+            self._load_error = "manifest root must be an object"
+            logger.error(self._load_error)
+            self._loaded = True
+            return []
 
         schema_version = raw.get("schema_version", "unknown")
         if schema_version != CURRENT_SCHEMA_VERSION:
-            logger.warning("manifest schema version mismatch: %s vs %s", schema_version, CURRENT_SCHEMA_VERSION)
+            self._load_error = f"manifest schema version mismatch: {schema_version} vs {CURRENT_SCHEMA_VERSION}"
+            logger.error(self._load_error)
+            self._loaded = True
+            return []
 
         entries_raw = raw.get("entries", [])
         if not isinstance(entries_raw, list):
-            raise ValueError("manifest.entries must be a list")
+            self._load_error = "manifest.entries must be a list"
+            logger.error(self._load_error)
+            self._loaded = True
+            return []
+
+        if len(entries_raw) == 0:
+            self._load_error = "manifest.entries is empty"
+            logger.error(self._load_error)
+            self._loaded = True
+            return []
 
         entries: list[ManifestEntry] = []
         seen_ids: set[str] = set()
@@ -158,26 +186,39 @@ class ManifestLoader:
 
         for idx, e in enumerate(entries_raw):
             if not isinstance(e, dict):
-                raise ValueError(f"entry[{idx}] is not an object")
+                self._load_error = f"entry[{idx}] is not an object"
+                logger.error(self._load_error)
+                self._loaded = True
+                return []
 
             # 必填字段
             for required in ("manifest_id", "bucket_id", "protection"):
                 if required not in e:
-                    raise ValueError(f"entry[{idx}] missing required field: {required}")
+                    self._load_error = f"entry[{idx}] missing required field: {required}"
+                    logger.error(self._load_error)
+                    self._loaded = True
+                    return []
 
             # 保护级别白名单
             if e["protection"] not in PROTECTION_LEVELS:
-                raise ValueError(
-                    f"entry[{idx}] protection '{e['protection']}' not in {PROTECTION_LEVELS}"
-                )
+                self._load_error = f"entry[{idx}] protection '{e['protection']}' not in {PROTECTION_LEVELS}"
+                logger.error(self._load_error)
+                self._loaded = True
+                return []
 
             # 唯一性
             mid = e["manifest_id"]
             bid = e["bucket_id"]
             if mid in seen_ids:
-                raise ValueError(f"duplicate manifest_id: {mid}")
+                self._load_error = f"duplicate manifest_id: {mid}"
+                logger.error(self._load_error)
+                self._loaded = True
+                return []
             if bid in seen_buckets:
-                raise ValueError(f"duplicate bucket_id: {bid}")
+                self._load_error = f"duplicate bucket_id: {bid}"
+                logger.error(self._load_error)
+                self._loaded = True
+                return []
             seen_ids.add(mid)
             seen_buckets.add(bid)
 
@@ -188,6 +229,16 @@ class ManifestLoader:
         self._loaded = True
         logger.info("manifest loaded: %s entries from %s", len(entries), self.manifest_path)
         return entries
+
+    def readiness(self) -> tuple[bool, str]:
+        """Readiness 检查：清单必须存在、可解析、有有效条目。"""
+        if not self._loaded:
+            self.load()
+        if self._load_error:
+            return False, f"manifest not ready: {self._load_error}"
+        if not self._entries:
+            return False, "manifest not ready: no entries"
+        return True, f"manifest ready: {len(self._entries)} entries"
 
     def get_active(self) -> list[ManifestEntry]:
         """返回 active=True 的条目。"""
@@ -205,7 +256,40 @@ class ManifestLoader:
         return {e.bucket_id for e in self.get_active() if e.protection in PROTECTION_LEVELS}
 
 
-# ─── Bucket 内容 hash ─────────────────────────────────────────────────────────
+# ─── Nocturne Bucket 定位器（与上游 BucketManager._find_bucket_file 一致）──────
+
+class NocturneBucketLocator:
+    """在 Nocturne 的 permanent/dynamic/archive/feel 目录中定位 bucket 文件。"""
+
+    DIRS = ["permanent", "dynamic", "archive", "feel"]
+
+    def __init__(self, buckets_base_dir: Path | str) -> None:
+        self.base_dir = Path(buckets_base_dir)
+
+    def find_bucket_file(self, bucket_id: str) -> Path | None:
+        """递归查找 bucket ID 对应的 .md 文件。
+
+        匹配逻辑与 Nocturne BucketManager._find_bucket_file 一致：
+        - 文件名 == bucket_id + ".md"
+        - 文件名以 "_" + bucket_id + ".md" 结尾
+        """
+        if not bucket_id:
+            return None
+        for subdir in self.DIRS:
+            dir_path = self.base_dir / subdir
+            if not dir_path.exists():
+                continue
+            for root, _dirs, files in os.walk(str(dir_path)):
+                for fname in files:
+                    if not fname.endswith(".md"):
+                        continue
+                    name_part = fname[:-3]  # remove .md
+                    if name_part == bucket_id or name_part.endswith(f"_{bucket_id}"):
+                        return Path(root) / fname
+        return None
+
+
+# ─── 文件 hash ────────────────────────────────────────────────────────────────
 
 def _hash_file(path: Path) -> str:
     """计算文件 SHA256。"""
@@ -221,44 +305,61 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-# ─── YAML metadata 读取/写入（简化实现，实际使用 ruamel.yaml 或 PyYAML）───
+# ─── Frontmatter 读写（使用 python-frontmatter）────────────────────────────────
 
-def _read_yaml_metadata(bucket_path: Path) -> dict[str, Any]:
-    """从 bucket 目录读取 metadata.yaml。"""
-    meta_path = bucket_path / "metadata.yaml"
-    if not meta_path.exists():
-        return {}
+def _read_frontmatter(file_path: Path) -> tuple[dict[str, Any], str, str]:
+    """从 Markdown 文件读取 frontmatter metadata 和 body。
 
+    返回：(metadata_dict, body_text, full_file_hash)
+    """
     try:
-        import yaml
-        return yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
-    except Exception as e:
-        raise RuntimeError(f"YAML parse error in {meta_path}: {e}") from e
+        import frontmatter
+    except ImportError as e:
+        raise RuntimeError("python-frontmatter is required") from e
+
+    post = frontmatter.load(str(file_path))
+    metadata = dict(post.metadata)
+    body = post.content
+    full_hash = _hash_file(file_path)
+    return metadata, body, full_hash
 
 
-def _write_yaml_metadata(bucket_path: Path, metadata: dict[str, Any]) -> None:
-    """原子写入 metadata.yaml：临时文件 → 校验 → 替换。"""
-    meta_path = bucket_path / "metadata.yaml"
+def _write_frontmatter(
+    file_path: Path,
+    metadata: dict[str, Any],
+    body: str,
+    verify: bool = True,
+) -> None:
+    """原子写入 Markdown 文件：临时文件 → 回读校验 → 替换。
 
-    # 使用临时文件
-    fd, tmp_path = tempfile.mkstemp(dir=str(bucket_path), suffix=".yaml.tmp")
+    保持 frontmatter + body 格式不变，只修改 metadata。
+    """
+    try:
+        import frontmatter
+    except ImportError as e:
+        raise RuntimeError("python-frontmatter is required") from e
+
+    # 使用与文件同目录的临时文件（保证同文件系统，os.replace 原子）
+    parent_dir = file_path.parent
+    fd, tmp_path = tempfile.mkstemp(dir=str(parent_dir), suffix=".md.tmp")
     try:
         os.close(fd)
         tmp_file = Path(tmp_path)
 
-        import yaml
-        text = yaml.dump(metadata, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        tmp_file.write_text(text, encoding="utf-8")
+        post = frontmatter.Post(body, **metadata)
+        tmp_file.write_text(frontmatter.dumps(post), encoding="utf-8")
 
-        # 校验：重新读取确保可解析
-        parsed = yaml.safe_load(tmp_file.read_text(encoding="utf-8"))
-        if parsed is None and metadata:
-            raise RuntimeError("YAML round-trip validation failed: parsed is None")
+        if verify:
+            # 回读校验
+            verify_post = frontmatter.load(str(tmp_file))
+            if dict(verify_post.metadata) != metadata:
+                raise RuntimeError("frontmatter round-trip metadata mismatch")
+            if verify_post.content != body:
+                raise RuntimeError("frontmatter round-trip body mismatch")
 
         # 原子替换
-        os.replace(tmp_file, meta_path)
+        os.replace(tmp_file, file_path)
     except Exception:
-        # 清理临时文件
         if Path(tmp_path).exists():
             Path(tmp_path).unlink()
         raise
@@ -267,27 +368,35 @@ def _write_yaml_metadata(bucket_path: Path, metadata: dict[str, Any]) -> None:
 # ─── 保护同步器 ───────────────────────────────────────────────────────────────
 
 class ProtectionSynchronizer:
-    """将 manifest 的 pinned/protected 同步到 Nocturne bucket metadata。
+    """将 manifest 的 pinned/protected 同步到 Nocturne bucket frontmatter。
 
     约束：
-    1. 只修改 metadata，不碰正文
-    2. 正文 hash 前后必须一致
-    3. 使用临时文件 + 原子替换
-    4. bucket 不存在 / source ref 不符 / YAML 损坏 / 写入失败 → fail closed
-    5. 记录完整审计日志
+    1. 使用 Nocturne 原生 Markdown + frontmatter 格式
+    2. 只修改 frontmatter 中的 pinned/protected 布尔字段，不碰正文 body
+    3. 正文 body hash 前后必须一致
+    4. 使用同目录临时文件 + flush/fsync + 回读校验 + 原子替换
+    5. bucket 不存在 / source ref 不符 / frontmatter 损坏 / 写入失败 → fail closed
+    6. 记录完整审计日志（数据库 + 本地 JSONL）
     """
 
-    def __init__(self, buckets_dir: Path | str, audit_dir: Path | str) -> None:
-        self.buckets_dir = Path(buckets_dir)
+    def __init__(
+        self,
+        buckets_base_dir: Path | str,
+        audit_dir: Path | str,
+        pg_dsn: str | None = None,
+    ) -> None:
+        self.locator = NocturneBucketLocator(buckets_base_dir)
         self.audit_dir = Path(audit_dir)
         self.audit_dir.mkdir(parents=True, exist_ok=True)
+        self.pg_dsn = pg_dsn
 
     def sync(self, entry: ManifestEntry) -> SyncAuditRecord:
         """执行单次同步，返回审计记录。"""
-        sync_id = f"sync-{hashlib.sha256(os.urandom(16)).hexdigest()[:16]}"
+        import uuid
+
+        sync_id = f"sync-{uuid.uuid4().hex[:16]}"
         started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
-        bucket_path = self.buckets_dir / entry.bucket_id
         content_hash_before = ""
         content_hash_after = ""
         metadata_before: dict[str, Any] = {}
@@ -296,53 +405,57 @@ class ProtectionSynchronizer:
         error: str | None = None
 
         try:
-            # 1. bucket 必须存在
-            if not bucket_path.exists():
-                raise FileNotFoundError(f"bucket not found: {bucket_path}")
+            # 1. 定位 bucket 文件
+            file_path = self.locator.find_bucket_file(entry.bucket_id)
+            if not file_path:
+                raise FileNotFoundError(f"bucket file not found for id={entry.bucket_id}")
 
-            # 2. 计算正文 hash（同步前）
-            content_file = bucket_path / "content.md"
-            if content_file.exists():
-                content_hash_before = _hash_file(content_file)
-            else:
-                content_hash_before = "no-content"
+            # 2. 读取当前 frontmatter + body
+            metadata_before, body, content_hash_before = _read_frontmatter(file_path)
 
-            # 3. 读取当前 metadata
-            metadata_before = _read_yaml_metadata(bucket_path)
-
-            # 4. source ref 校验（如果 expected_source_ref 非空）
+            # 3. source ref 校验（如果 expected_source_ref 非空）
             current_source = metadata_before.get("source", "")
             if entry.expected_source_ref and current_source != entry.expected_source_ref:
                 raise ValueError(
                     f"source ref mismatch: expected '{entry.expected_source_ref}', got '{current_source}'"
                 )
 
-            # 5. 准备新 metadata（深拷贝，只改 protection 相关字段）
+            # 4. 准备新 metadata（深拷贝，只改 pinned/protected 布尔字段）
             metadata_after = copy.deepcopy(metadata_before)
-            metadata_after["protection"] = entry.protection
+
+            # 按 entry.protection 设置布尔字段
+            if entry.protection == "pinned":
+                metadata_after["pinned"] = True
+                metadata_after.pop("protected", None)  # 清理互斥字段
+            elif entry.protection == "protected":
+                metadata_after["protected"] = True
+                metadata_after.pop("pinned", None)
+
             metadata_after["manifest_id"] = entry.manifest_id
             metadata_after["protection_synced_at"] = started_at
 
-            # 6. 原子写入
-            _write_yaml_metadata(bucket_path, metadata_after)
+            # 5. 原子写入（保持 body 不变）
+            _write_frontmatter(file_path, metadata_after, body, verify=True)
 
-            # 7. 验证：重新读取并比对
-            re_read = _read_yaml_metadata(bucket_path)
-            if re_read.get("protection") != entry.protection:
-                raise RuntimeError("metadata write verification failed: protection not set")
+            # 6. 验证：重新读取并比对 frontmatter
+            re_read_meta, re_read_body, content_hash_after = _read_frontmatter(file_path)
+            protection_ok = False
+            if entry.protection == "pinned":
+                protection_ok = re_read_meta.get("pinned") is True
+            elif entry.protection == "protected":
+                protection_ok = re_read_meta.get("protected") is True
+            if not protection_ok:
+                raise RuntimeError("frontmatter write verification failed: protection bool not set")
 
-            # 8. 重新计算正文 hash（必须一致）
-            if content_file.exists():
-                content_hash_after = _hash_file(content_file)
-            else:
-                content_hash_after = "no-content"
-
-            if content_hash_before != content_hash_after:
-                # 严重错误：正文被修改了，尝试回滚 metadata
-                _write_yaml_metadata(bucket_path, metadata_before)
+            # 7. body hash 必须一致
+            body_hash_before = _hash_text(body)
+            body_hash_after = _hash_text(re_read_body)
+            if body_hash_before != body_hash_after:
+                # 严重错误：正文被修改了，尝试回滚 frontmatter
+                _write_frontmatter(file_path, metadata_before, body, verify=False)
                 raise RuntimeError(
-                    f"CONTENT CORRUPTION DETECTED: hash before={content_hash_before} after={content_hash_after}. "
-                    f"Metadata rolled back."
+                    f"CONTENT CORRUPTION DETECTED: body hash before={body_hash_before} "
+                    f"after={body_hash_after}. Frontmatter rolled back."
                 )
 
             success = True
@@ -350,7 +463,7 @@ class ProtectionSynchronizer:
 
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
-            logger.error("sync failed: %s", error)
+            logger.error("sync failed: bucket=%s error=%s", entry.bucket_id, error, exc_info=True)
 
         completed_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -370,8 +483,9 @@ class ProtectionSynchronizer:
             error=error,
         )
 
-        # 写入审计日志
+        # 写入审计（数据库 + 本地 JSONL）
         self._append_audit(record)
+        self._append_db_audit(record)
         return record
 
     def sync_all(self, manifest: ManifestLoader) -> list[SyncAuditRecord]:
@@ -387,30 +501,47 @@ class ProtectionSynchronizer:
         return records
 
     def rollback_metadata(self, audit_record: SyncAuditRecord) -> SyncAuditRecord:
-        """根据审计记录回滚 metadata 到同步前状态。"""
-        sync_id = f"rollback-{hashlib.sha256(os.urandom(16)).hexdigest()[:16]}"
+        """根据审计记录回滚 frontmatter 到同步前状态。"""
+        import uuid
+
+        sync_id = f"rollback-{uuid.uuid4().hex[:16]}"
         started_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        bucket_path = self.buckets_dir / audit_record.bucket_id
         success = False
         error: str | None = None
 
         try:
-            if not bucket_path.exists():
-                raise FileNotFoundError(f"bucket not found: {bucket_path}")
+            file_path = self.locator.find_bucket_file(audit_record.bucket_id)
+            if not file_path:
+                raise FileNotFoundError(f"bucket file not found for id={audit_record.bucket_id}")
 
-            # 回滚到同步前的 metadata
-            _write_yaml_metadata(bucket_path, audit_record.metadata_before)
+            # 读取当前状态
+            current_meta, current_body, _ = _read_frontmatter(file_path)
+            current_body_hash = _hash_text(current_body)
+
+            # 回滚到同步前的 metadata（保持当前 body）
+            _write_frontmatter(file_path, audit_record.metadata_before, current_body, verify=True)
 
             # 验证
-            re_read = _read_yaml_metadata(bucket_path)
-            if re_read.get("protection") == audit_record.metadata_before.get("protection"):
-                success = True
-                logger.info("rollback success: bucket=%s", audit_record.bucket_id)
-            else:
-                raise RuntimeError("rollback verification failed")
+            re_read_meta, re_read_body, _ = _read_frontmatter(file_path)
+            re_read_body_hash = _hash_text(re_read_body)
+
+            # 确认回滚后的 body 不变
+            if current_body_hash != re_read_body_hash:
+                raise RuntimeError(f"rollback corrupted body: hash changed")
+
+            # 确认保护字段已恢复
+            before_pinned = audit_record.metadata_before.get("pinned", False)
+            before_protected = audit_record.metadata_before.get("protected", False)
+            if before_pinned and not re_read_meta.get("pinned"):
+                raise RuntimeError("rollback verification failed: pinned not restored")
+            if before_protected and not re_read_meta.get("protected"):
+                raise RuntimeError("rollback verification failed: protected not restored")
+
+            success = True
+            logger.info("rollback success: bucket=%s", audit_record.bucket_id)
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
-            logger.error("rollback failed: %s", error)
+            logger.error("rollback failed: bucket=%s error=%s", audit_record.bucket_id, error, exc_info=True)
 
         completed_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -430,6 +561,7 @@ class ProtectionSynchronizer:
             error=error,
         )
         self._append_audit(record)
+        self._append_db_audit(record)
         return record
 
     def _append_audit(self, record: SyncAuditRecord) -> None:
@@ -438,3 +570,31 @@ class ProtectionSynchronizer:
         audit_file = self.audit_dir / f"manifest-sync-audit-{date_str}.jsonl"
         with open(audit_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record.to_dict(), ensure_ascii=False, default=str) + "\n")
+
+    def _append_db_audit(self, record: SyncAuditRecord) -> None:
+        """追加审计记录到 PostgreSQL manifest_sync_audit 表。"""
+        if not self.pg_dsn:
+            return
+        try:
+            import psycopg
+            with psycopg.connect(self.pg_dsn) as pg:
+                pg.execute(
+                    """
+                    INSERT INTO manifest_sync_audit
+                    (sync_id, manifest_id, bucket_id, operation, content_hash_before, content_hash_after,
+                     metadata_before, metadata_after, manifest_entry, started_at, completed_at, success, error)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (sync_id) DO NOTHING
+                    """,
+                    (
+                        record.sync_id, record.manifest_id, record.bucket_id, record.operation,
+                        record.content_hash_before, record.content_hash_after,
+                        json.dumps(record.metadata_before, ensure_ascii=False, default=str),
+                        json.dumps(record.metadata_after, ensure_ascii=False, default=str),
+                        json.dumps(record.manifest_entry, ensure_ascii=False, default=str),
+                        record.started_at, record.completed_at, record.success, record.error,
+                    ),
+                )
+                pg.commit()
+        except Exception as e:
+            logger.error("failed to write manifest audit to DB: %s", e, exc_info=True)
