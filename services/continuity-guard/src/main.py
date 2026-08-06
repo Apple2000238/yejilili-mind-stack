@@ -225,51 +225,6 @@ def _make_xinchao_adapter():
             }
             return receipt
     return _adapter
-    """创建 Nocturne 目标系统 async adapter。"""
-    import httpx
-    endpoint = os.environ.get("NOCTURNE_ADAPTER_ENDPOINT", "http://nocturne-adapter:8001")
-    token = _load_secret_file("NOCTURNE_API_TOKEN", "")
-    timeout = float(os.environ.get("ADAPTER_TIMEOUT_SECONDS", "10"))
-
-    async def _adapter(payload: dict) -> dict:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            headers = {"Content-Type": "application/json"}
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            resp = await client.post(
-                f"{endpoint}/api/v1/hold",
-                json=payload,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            return resp.json()
-    return _adapter
-
-
-def _make_xinchao_adapter():
-    """创建心潮目标系统 async adapter。"""
-    import httpx
-    endpoint = os.environ.get("XINCHAO_ADAPTER_ENDPOINT", "http://xinchao:3000")
-    token = _load_secret_file("XINCHAO_API_TOKEN", "")
-    timeout = float(os.environ.get("ADAPTER_TIMEOUT_SECONDS", "10"))
-
-    async def _adapter(payload: dict) -> dict:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            headers = {"Content-Type": "application/json"}
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            # 根据 payload 类型分发到心潮不同端点
-            if payload.get("type") in ("memory_residue", "dialogue_residue"):
-                url = f"{endpoint}/api/continuity/ingest"
-            elif "driveDeltas" in payload or "satisfiedDrives" in payload:
-                url = f"{endpoint}/api/drive/apply"
-            else:
-                url = f"{endpoint}/api/event"
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
-    return _adapter
-
 
 # ─── 鉴权 helpers ─────────────────────────────────────────────────────────────
 

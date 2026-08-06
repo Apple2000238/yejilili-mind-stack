@@ -25,6 +25,10 @@ class Config:
     # 可选：Postgres 配置（用于读取 edge_gateway_config 表做热切换）
     postgres_dsn: Optional[str] = None
 
+    # Identity Gate 配置（五段 PromptPlan 装配源）
+    identity_gate_url: str = ""
+    identity_gate_token: str = ""
+
     # 管理接口鉴权（空字符串表示禁用鉴权，仅用于测试/开发）
     admin_token: str = ""
 
@@ -48,6 +52,8 @@ def load_config() -> Config:
     anthropic_base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
     admin_token = _read_secret(os.environ.get("ADMIN_TOKEN_FILE", ""))
+    identity_gate_url = os.environ.get("IDENTITY_GATE_URL", "http://continuity-guard:8003")
+    identity_gate_token = _read_secret(os.environ.get("IDENTITY_GATE_TOKEN_FILE", ""))
 
     # 优先直接 DSN，其次从组件构造（支持 Docker secret 密码文件）
     postgres_dsn = os.environ.get("POSTGRES_DSN") or None
@@ -73,5 +79,7 @@ def load_config() -> Config:
         anthropic_base_url=anthropic_base_url,
         anthropic_model=anthropic_model,
         postgres_dsn=postgres_dsn,
+        identity_gate_url=identity_gate_url,
+        identity_gate_token=identity_gate_token,
         admin_token=admin_token,
     )

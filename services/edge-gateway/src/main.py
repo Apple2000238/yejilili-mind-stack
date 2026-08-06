@@ -100,7 +100,8 @@ async def health() -> dict:
         "service": "edge-gateway",
         "providers": list_providers(),
         "current_provider": _current_provider_name,
-        "prompt_plan_enabled": _prompt_plan.enabled,
+        "identity_gate_url": config.identity_gate_url,
+        "identity_gate_configured": bool(config.identity_gate_url),
         "ledger_available": _ledger._available,
     }
 
@@ -165,12 +166,39 @@ async def _handle_chat_request(
             logger.info("duplicate request skipped: session=%s", session_id)
             raise HTTPException(status_code=409, detail="Duplicate request detected")
 
-    # ── 3. PromptPlan 注入 ─────────────────────────────────────────────────
-    if _prompt_plan.enabled and messages:
-        original_system = [m for m in messages if m.get("role") == "system"]
-        messages = _prompt_plan.assemble(messages)
-        if messages != original_system + [m for m in messages if m.get("role") != "system"]:
-            logger.debug("prompt plan injected: %d system messages", len([m for m in messages if m.get("role") == "system"]))
+    # ── 3. PromptPlan 注入（R6-02：统一调用 identity gate 五段装配）────────────────
+    if messages and config.identity_gate_url:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                headers = {"Content-Type": "application/json"}
+                if config.identity_gate_token:
+                    headers["Authorization"] = f"Bearer {config.identity_gate_token}"
+                resp = await client.post(
+                    f"{config.identity_gate_url}/identity/assemble",
+                    json=messages,
+                    headers=headers,
+                )
+                if resp.status_code == 507:
+                    # token budget overflow：向上传播明确错误
+                    detail = resp.json()
+                    logger.error("identity gate overflow: %s", detail)
+                    raise HTTPException(status_code=507, detail=detail)
+                resp.raise_for_status()
+                data = resp.json()
+                messages = data.get("messages", messages)
+                assembly = data.get("assembly", {})
+                logger.info(
+                    "identity gate assembled: assembly_id=%s total_tokens=%d overflow=%s",
+                    assembly.get("assembly_id", "unknown"),
+                    assembly.get("total_tokens", 0),
+                    assembly.get("overflow", False),
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning("identity gate unavailable, falling back to original messages: %s", e)
+            # 降级：保留原始 messages，不阻断请求
 
     # ── 4. 准备 provider ───────────────────────────────────────────────────
     provider_name = body.get("provider") or _current_provider_name
