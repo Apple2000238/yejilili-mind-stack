@@ -103,7 +103,7 @@ def snapshot_pre(run_id: str, source_db: str | None) -> dict[str, Any]:
     git_commit = "unknown"
     try:
         import subprocess
-        git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()  # nosec: B603 - fixed cmd list, no shell injection
     except Exception as e:
         logger.warning('git commit read failed: %s', e)
 
@@ -318,7 +318,7 @@ def export_source(source_db: str, run_id: str) -> dict[str, Any]:
 
     for (table_name,) in tables:
         # row count
-        count = check_db.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
+        count = check_db.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]  # nosec: B608 - internal known table name from sqlite_master
         # schema
         schema = check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()  # nosec: B608 - internal known table name
         schema_text = json.dumps(schema, sort_keys=True, ensure_ascii=False)
@@ -893,7 +893,7 @@ def verify_run(run_id: str) -> dict[str, Any]:
             meta_projs = meta.get("projections", {})
             for proj_name, meta_count in meta_projs.items():
                 real_count = pg.execute(
-                    f"SELECT COUNT(*) AS c FROM {proj_name} WHERE run_id=%s", (run_id,)
+                    f"SELECT COUNT(*) AS c FROM {proj_name} WHERE run_id=%s", (run_id,)  # nosec: B608 - internal known projection table name
                 ).fetchone()["c"]
                 if real_count != meta_count:
                     results["overall"] = "FAIL"
