@@ -11,6 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "services" / "edge-gateway"))
 
+# Clear cached "src" from other service tests to avoid import collision
+for mod in list(sys.modules.keys()):
+    if mod == "src" or mod.startswith("src."):
+        del sys.modules[mod]
+
 import pytest
 
 from src import idempotency as idem
