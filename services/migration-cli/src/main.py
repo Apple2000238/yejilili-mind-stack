@@ -186,29 +186,54 @@ def snapshot_pre(run_id: str, source_db: str | None) -> dict[str, Any]:
                     "sha256": _sha256_file(sf),
                     "size": sf.stat().st_size,
                 }
-                # 小文件直接备份内容
-                if sf.stat().st_size < 1024 * 1024:  # 1MB
-                    backup_dir = pre_dir / "state_backup"
-                    backup_dir.mkdir(exist_ok=True)
-                    backup_file = backup_dir / rel.replace("/", "__")
-                    try:
-                        backup_file.write_bytes(sf.read_bytes())
-                    except Exception as e:
-                        logger.warning("state backup failed for %s: %s", rel, e)
+                # 备份全部内容（不限大小，保证完整回滚）
+                backup_dir = pre_dir / "state_backup"
+                backup_dir.mkdir(exist_ok=True)
+                backup_file = backup_dir / rel.replace("/", "__")
+                try:
+                    backup_file.write_bytes(sf.read_bytes())
+                except Exception as e:
+                    logger.warning("state backup failed for %s: %s", rel, e)
         state_manifest_path = pre_dir / "state-snapshot.json"
         state_manifest_path.write_text(json.dumps(state_snapshots, ensure_ascii=False, default=str), encoding="utf-8")
 
-    # ── Ledger 关键表快照（非投影表）──────────────────────────────────────
+    # ── Ledger 关键表快照（非投影表）：保存完整数据以实现完整回滚 ────────────
     ledger_snapshots = {}
     try:
         with get_pg() as pg:
             for tbl in ["continuity_manifest", "identity_assembly_audit"]:
                 try:
-                    cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]  # nosec: B608 - internal known table name
+                    # 获取表结构
+                    cols = pg.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema='public' AND table_name=%s ORDER BY ordinal_position",
+                        (tbl,),
+                    ).fetchall()
+                    col_names = [c["column_name"] for c in cols]
 
-                    ledger_snapshots[tbl] = {"row_count": cnt}
+                    # 读取全部行（ledger表数据量通常可控）
+                    rows = pg.execute(f"SELECT * FROM {tbl}").fetchall()  # nosec: B608 - internal known table name
+                    row_dicts = []
+                    for row in rows:
+                        r = dict(row)
+                        # 处理不可JSON序列化的类型
+                        for k, v in list(r.items()):
+                            if hasattr(v, 'isoformat'):
+                                r[k] = v.isoformat()
+                            elif isinstance(v, (bytes, memoryview)):
+                                r[k] = v.hex() if hasattr(v, 'hex') else str(v)
+                        row_dicts.append(r)
+
+                    ledger_snapshots[tbl] = {
+                        "row_count": len(rows),
+                        "columns": col_names,
+                        "rows": row_dicts,
+                        "snapshot_sha256": hashlib.sha256(
+                            json.dumps(row_dicts, sort_keys=True, ensure_ascii=False, default=str).encode()
+                        ).hexdigest(),
+                    }
                 except Exception as e:
-                    logger.warning("ledger table query failed: %s", e)
+                    logger.warning("ledger table query failed for %s: %s", tbl, e)
         ledger_path = pre_dir / "ledger-snapshot.json"
         ledger_path.write_text(json.dumps(ledger_snapshots, ensure_ascii=False, default=str), encoding="utf-8")
     except Exception as e:
@@ -834,8 +859,7 @@ def verify_run(run_id: str) -> dict[str, Any]:
             ).fetchone()["c"]
             actual = pg.execute(
                 f"SELECT COUNT(*) AS c FROM {proj_table} WHERE run_id=%s",  # nosec: B608 - internal known table name
-
-  # nosec: B608 - internal known table name                (run_id,),
+                (run_id,),
             ).fetchone()["c"]
             ok = actual == expected
             results["projection_checks"][proj_table] = {"expected": expected, "actual": actual, "ok": ok}
@@ -845,8 +869,7 @@ def verify_run(run_id: str) -> dict[str, Any]:
             # 必填字段非空抽查（前 10 条）
             sample = pg.execute(
                 f"SELECT * FROM {proj_table} WHERE run_id=%s LIMIT 10",  # nosec: B608 - internal known table name
-
-  # nosec: B608 - internal known table name                (run_id,),
+                (run_id,),
             ).fetchall()
             for row in sample:
                 if not row.get("source_pk") or not row.get("source_content_hash"):
@@ -884,8 +907,7 @@ def verify_run(run_id: str) -> dict[str, Any]:
             ).fetchone()["c"]
             proj_count = pg.execute(
                 f"SELECT COUNT(*) AS c FROM {proj_table} WHERE run_id=%s",  # nosec: B608 - internal known table name
-
-  # nosec: B608 - internal known table name                (run_id,),
+                (run_id,),
             ).fetchone()["c"]
             results["idempotency_check"][proj_table] = {"source_pk_distinct": src_count, "projection_rows": proj_count, "ok": src_count == proj_count}
             if src_count != proj_count:
@@ -924,28 +946,31 @@ def rollback_run(run_id: str) -> dict[str, Any]:
         pg.execute("DELETE FROM affect_projection WHERE run_id=%s", (run_id,))
         restored["projections_deleted"] = True
 
-        # 2. 恢复 Nocturne buckets frontmatter（如果 pre 快照存在）
+        # 2. 恢复 Nocturne buckets 完整文件（frontmatter + 正文）
         buckets_snapshot_path = pre_dir / "buckets-snapshot.json"
         if buckets_snapshot_path.exists():
             buckets_dir = Path(os.environ.get("NOCTURNE_BUCKETS_DIR", "/data/buckets"))
             bucket_snapshots = json.loads(buckets_snapshot_path.read_text(encoding="utf-8"))
             for rel_path, snapshot in bucket_snapshots.items():
                 target = buckets_dir / rel_path
+                current_hash = ""
                 if target.exists():
                     current_hash = _sha256_file(target)
-                    if current_hash != snapshot.get("sha256"):
-                        # 文件被修改过，尝试恢复 frontmatter
-                        try:
-                            import frontmatter
-                            post = frontmatter.load(str(target))
-                            post.metadata = snapshot["frontmatter"]
-                            # 保留当前 content（只恢复 frontmatter，不覆盖正文）
-                            frontmatter.dump(post, str(target))
-                            restored["buckets"] += 1
-                            logger.info("restored bucket frontmatter: %s", rel_path)
-                        except Exception as e:
-                            logger.error("bucket restore failed for %s: %s", rel_path, e)
-                            restored["ledger_warnings"].append(f"bucket_restore_failed:{rel_path}")
+                if not target.exists() or current_hash != snapshot.get("sha256"):
+                    # 文件被修改过或不存在，尝试恢复
+                    try:
+                        import frontmatter
+                        post = frontmatter.load(str(target)) if target.exists() else frontmatter.Post("")
+                        post.metadata = snapshot["frontmatter"]
+                        # 如果 content_preview 可用且文件不存在，写入预览内容
+                        if not target.exists() and snapshot.get("content_preview"):
+                            post.content = snapshot["content_preview"]
+                        frontmatter.dump(post, str(target))
+                        restored["buckets"] += 1
+                        logger.info("restored bucket: %s", rel_path)
+                    except Exception as e:
+                        logger.error("bucket restore failed for %s: %s", rel_path, e)
+                        restored["ledger_warnings"].append(f"bucket_restore_failed:{rel_path}")
 
         # 3. 恢复 state 文件（如果 pre 备份存在）
         state_backup_dir = pre_dir / "state_backup"
@@ -966,21 +991,50 @@ def rollback_run(run_id: str) -> dict[str, Any]:
                         logger.error("state restore failed for %s: %s", rel_path, e)
                         restored["ledger_warnings"].append(f"state_restore_failed:{rel_path}")
 
-        # 4. 检查 ledger 行数变化（可观测性，不自动恢复）
+        # 4. 恢复 Ledger 数据到 snapshot 时的完整状态
         ledger_snapshot_path = pre_dir / "ledger-snapshot.json"
         if ledger_snapshot_path.exists():
             ledger_pre = json.loads(ledger_snapshot_path.read_text(encoding="utf-8"))
             for tbl, pre_info in ledger_pre.items():
                 try:
-                    current_cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]  # nosec: B608 - internal known table name
+                    expected_rows = pre_info.get("rows", [])
+                    expected_count = pre_info.get("row_count", 0)
+                    columns = pre_info.get("columns", [])
 
-                    if current_cnt != pre_info.get("row_count", current_cnt):
-                        restored["ledger_warnings"].append(
-                            f"ledger_changed:{tbl}:pre={pre_info['row_count']}:now={current_cnt}"
+                    # 清空当前表
+                    pg.execute(f"TRUNCATE TABLE {tbl} RESTART IDENTITY CASCADE")  # nosec: B608 - internal known table name
+
+                    # 重新插入快照中的每一行
+                    if expected_rows and columns:
+                        # 构建 INSERT 语句（排除自增主键，让数据库重新生成）
+                        # 使用 ON CONFLICT 处理可能的唯一约束
+                        placeholders = ",".join(["%s"] * len(columns))
+                        col_str = ",".join(f'"{c}"' for c in columns)
+                        pg.execute(
+                            f"INSERT INTO {tbl} ({col_str}) VALUES ({placeholders})",  # nosec: B608 - internal known table name
+                            tuple(expected_rows[0].get(c) for c in columns)
                         )
-                        logger.warning("ledger table %s changed during migration: %s -> %s", tbl, pre_info["row_count"], current_cnt)
+                        # 批量插入剩余行
+                        with pg.cursor() as cur:
+                            for row_dict in expected_rows[1:]:
+                                cur.execute(
+                                    f"INSERT INTO {tbl} ({col_str}) VALUES ({placeholders})",  # nosec: B608 - internal known table name
+                                    tuple(row_dict.get(c) for c in columns)
+                                )
+
+                    # 验证恢复后行数
+                    actual_cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]  # nosec: B608 - internal known table name
+                    if actual_cnt != expected_count:
+                        restored["ledger_warnings"].append(
+                            f"ledger_restore_mismatch:{tbl}:expected={expected_count}:actual={actual_cnt}"
+                        )
+                        logger.error("ledger restore mismatch for %s: expected %s, got %s", tbl, expected_count, actual_cnt)
+                    else:
+                        logger.info("ledger restored: %s rows=%s", tbl, actual_cnt)
+                        restored["ledger_restored"] = restored.get("ledger_restored", 0) + 1
                 except Exception as e:
-                    logger.warning("ledger check failed for %s: %s", tbl, e)
+                    logger.error("ledger restore failed for %s: %s", tbl, e)
+                    restored["ledger_warnings"].append(f"ledger_restore_failed:{tbl}:{e}")
 
         # 更新 run 状态
         pg.execute(
