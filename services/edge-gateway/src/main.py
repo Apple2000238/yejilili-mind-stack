@@ -103,16 +103,6 @@ async def health() -> dict:
         "prompt_plan_enabled": _prompt_plan.enabled,
         "ledger_available": _ledger._available,
     }
-@app.get("/health")
-async def health() -> dict:
-    return {
-        "status": "ok",
-        "service": "edge-gateway",
-        "providers": list_providers(),
-        "current_provider": _current_provider_name,
-        "prompt_plan_enabled": _prompt_plan.enabled,
-        "ledger_available": _ledger._available,
-    }
 
 
 @app.get("/v1/providers")
@@ -282,15 +272,6 @@ async def _handle_chat_request(
     if provider_name == "anthropic":
         return JSONResponse(_anthropic_to_openai(result, model))
     return JSONResponse(result)
-    if stream:
-        if protocol == "anthropic" or provider_name == "anthropic":
-            return StreamingResponse(result, media_type="text/event-stream")
-        return StreamingResponse(result, media_type="text/event-stream")
-
-    if protocol == "anthropic" or provider_name == "anthropic":
-        return JSONResponse(_anthropic_to_openai(result, model))
-    return JSONResponse(result)
-
 
 def _record_provenance(
     event_id: str,
