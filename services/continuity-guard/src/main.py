@@ -125,6 +125,106 @@ def _get_event_bridge() -> EventBridge:
 
 
 def _make_nocturne_adapter():
+    """创建 Nocturne 目标系统 async adapter。
+
+    使用真实 MCP 入口 POST /mcp，JSON-RPC tools/call，工具名 breath 或 hold。
+    """
+    import httpx
+    endpoint = os.environ.get("NOCTURNE_ADAPTER_ENDPOINT", "http://nocturne-adapter:8001")
+    token = _load_secret_file("NOCTURNE_API_TOKEN", "")
+    timeout = float(os.environ.get("ADAPTER_TIMEOUT_SECONDS", "10"))
+
+    async def _adapter(payload: dict) -> dict:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+            # 根据 payload 内容选择工具名
+            tool_name = "hold"  # 默认 hold
+            if payload.get("auto") is True or payload.get("source") == "xinchao-dream":
+                tool_name = "breath"
+
+            # JSON-RPC 2.0 请求
+            rpc_body = {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": tool_name,
+                    "arguments": payload,
+                },
+                "id": payload.get("event_id", "nocturne-req-1"),
+            }
+
+            resp = await client.post(
+                f"{endpoint}/mcp",
+                json=rpc_body,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            # 校验 JSON-RPC 响应结构
+            if "error" in result:
+                raise RuntimeError(f"MCP error: {result['error']}")
+            if result.get("id") != rpc_body["id"]:
+                raise RuntimeError("MCP response id mismatch")
+
+            # receipt 必须包含可关联的字段
+            receipt = {
+                "tool_name": tool_name,
+                "mcp_result": result.get("result", {}),
+                "request_id": rpc_body["id"],
+                "endpoint": f"{endpoint}/mcp",
+            }
+            return receipt
+    return _adapter
+
+
+def _make_xinchao_adapter():
+    """创建心潮目标系统 async adapter。
+
+    使用仓库内真实 HTTP 路由：
+    - POST /v1/conversation-event
+    - POST /v1/drive-feedback
+    - POST /v1/handoff-note
+    """
+    import httpx
+    endpoint = os.environ.get("XINCHAO_ADAPTER_ENDPOINT", "http://xinchao:3000")
+    token = _load_secret_file("XINCHAO_API_TOKEN", "")
+    timeout = float(os.environ.get("ADAPTER_TIMEOUT_SECONDS", "10"))
+
+    async def _adapter(payload: dict) -> dict:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+            # 根据 payload 内容映射到真实路由
+            if "driveDeltas" in payload or "satisfiedDrives" in payload:
+                url = f"{endpoint}/v1/drive-feedback"
+                route_name = "drive-feedback"
+            elif payload.get("type") == "handoff_note":
+                url = f"{endpoint}/v1/handoff-note"
+                route_name = "handoff-note"
+            else:
+                # 默认 conversation-event（覆盖 memory_residue / dialogue_residue 等）
+                url = f"{endpoint}/v1/conversation-event"
+                route_name = "conversation-event"
+
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            body = resp.json()
+
+            # receipt 必须关联 event 和目标路由
+            receipt = {
+                "route": route_name,
+                "url": url,
+                "status_code": resp.status_code,
+                "response_body": body,
+            }
+            return receipt
+    return _adapter
     """创建 Nocturne 目标系统 async adapter。"""
     import httpx
     endpoint = os.environ.get("NOCTURNE_ADAPTER_ENDPOINT", "http://nocturne-adapter:8001")

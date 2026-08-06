@@ -694,18 +694,25 @@ class EventBridge:
         if action == "conflict":
             raise ValueError(f"idempotency conflict: {reason}")
         if action == "skip":
-            return {"processed": False, "reason": reason, "event_id": envelope.event_id}
+            # 对 claimed/processing 状态，仍尝试 claim（支持崩溃恢复）
+            if "status=claimed" in reason or "status=processing" in reason:
+                claimed = self.store.claim(envelope.event_id, worker_id="guard-nocturne")
+                if not claimed:
+                    return {"processed": False, "reason": f"skip_and_claim_failed: {reason}", "event_id": envelope.event_id}
+                # claim 成功，继续处理
+            else:
+                return {"processed": False, "reason": reason, "event_id": envelope.event_id}
+        else:
+            # 正常流程：claim 事件
+            claimed = self.store.claim(envelope.event_id, worker_id="guard-nocturne")
+            if not claimed:
+                return {"processed": False, "reason": "claim_failed", "event_id": envelope.event_id}
 
-        # 2. 回环检查
+        # 2. 回环检查（claim 后检查，避免重复处理已回环事件）
         ok, loop_reason = self.loop.check(envelope)
         if not ok:
             self.store.mark_failed(envelope.event_id, f"loop_suppressed: {loop_reason}")
             return {"processed": False, "reason": f"loop_suppressed: {loop_reason}", "event_id": envelope.event_id}
-
-        # 3. claim 事件
-        claimed = self.store.claim(envelope.event_id, worker_id="guard-nocturne")
-        if not claimed:
-            return {"processed": False, "reason": "claim_failed", "event_id": envelope.event_id}
 
         self.store.mark_processing(envelope.event_id)
 
@@ -722,13 +729,15 @@ class EventBridge:
                 return {"processed": False, "reason": f"unknown_type: {envelope.event_type}", "event_id": envelope.event_id}
 
             # 5. 调用目标 adapter（心潮）
-            receipt: dict[str, Any] = {"translated": True}
-            if self.xinchao_adapter:
-                try:
-                    receipt = await self.xinchao_adapter(translated)
-                except Exception as e:
-                    self.store.mark_failed(envelope.event_id, f"target_error: {e}")
-                    raise RuntimeError(f"xinchao adapter failed: {e}") from e
+            if not self.xinchao_adapter:
+                self.store.mark_failed(envelope.event_id, "xinchao_adapter_not_configured")
+                raise RuntimeError("xinchao adapter not configured")
+
+            try:
+                receipt = await self.xinchao_adapter(translated)
+            except Exception as e:
+                self.store.mark_failed(envelope.event_id, f"target_error: {e}")
+                raise RuntimeError(f"xinchao adapter failed: {e}") from e
 
             # 6. 标记完成
             self.store.mark_completed(envelope.event_id, receipt)
@@ -754,18 +763,25 @@ class EventBridge:
         if action == "conflict":
             raise ValueError(f"idempotency conflict: {reason}")
         if action == "skip":
-            return {"processed": False, "reason": reason, "event_id": envelope.event_id}
+            # 对 claimed/processing 状态，仍尝试 claim（支持崩溃恢复）
+            if "status=claimed" in reason or "status=processing" in reason:
+                claimed = self.store.claim(envelope.event_id, worker_id="guard-xinchao")
+                if not claimed:
+                    return {"processed": False, "reason": f"skip_and_claim_failed: {reason}", "event_id": envelope.event_id}
+                # claim 成功，继续处理
+            else:
+                return {"processed": False, "reason": reason, "event_id": envelope.event_id}
+        else:
+            # 正常流程：claim 事件
+            claimed = self.store.claim(envelope.event_id, worker_id="guard-xinchao")
+            if not claimed:
+                return {"processed": False, "reason": "claim_failed", "event_id": envelope.event_id}
 
-        # 2. 回环检查
+        # 2. 回环检查（claim 后检查，避免重复处理已回环事件）
         ok, loop_reason = self.loop.check(envelope)
         if not ok:
             self.store.mark_failed(envelope.event_id, f"loop_suppressed: {loop_reason}")
             return {"processed": False, "reason": f"loop_suppressed: {loop_reason}", "event_id": envelope.event_id}
-
-        # 3. claim 事件
-        claimed = self.store.claim(envelope.event_id, worker_id="guard-xinchao")
-        if not claimed:
-            return {"processed": False, "reason": "claim_failed", "event_id": envelope.event_id}
 
         self.store.mark_processing(envelope.event_id)
 
@@ -782,13 +798,15 @@ class EventBridge:
                 return {"processed": False, "reason": f"unknown_type: {envelope.event_type}", "event_id": envelope.event_id}
 
             # 5. 调用目标 adapter（Nocturne）
-            receipt: dict[str, Any] = {"translated": True}
-            if self.nocturne_adapter:
-                try:
-                    receipt = await self.nocturne_adapter(translated)
-                except Exception as e:
-                    self.store.mark_failed(envelope.event_id, f"target_error: {e}")
-                    raise RuntimeError(f"nocturne adapter failed: {e}") from e
+            if not self.nocturne_adapter:
+                self.store.mark_failed(envelope.event_id, "nocturne_adapter_not_configured")
+                raise RuntimeError("nocturne adapter not configured")
+
+            try:
+                receipt = await self.nocturne_adapter(translated)
+            except Exception as e:
+                self.store.mark_failed(envelope.event_id, f"target_error: {e}")
+                raise RuntimeError(f"nocturne adapter failed: {e}") from e
 
             # 6. 标记完成
             self.store.mark_completed(envelope.event_id, receipt)
