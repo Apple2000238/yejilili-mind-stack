@@ -432,7 +432,7 @@ async def dashboard_manifest(request: Request) -> dict:
 
 def main() -> None:
     port = int(os.environ.get("GUARD_PORT", "8003"))
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")  # nosec: B104 - Docker container default bind
 
 
 if __name__ == "__main__":

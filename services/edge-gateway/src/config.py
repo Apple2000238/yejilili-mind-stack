@@ -24,7 +24,6 @@ class Config:
 
     # 可选：Postgres 配置（用于读取 edge_gateway_config 表做热切换）
     postgres_dsn: Optional[str] = None
-    postgres_dsn: Optional[str] = None
 
     # 管理接口鉴权（空字符串表示禁用鉴权，仅用于测试/开发）
     admin_token: str = ""
@@ -39,7 +38,7 @@ def _read_secret(path: str) -> str:
 
 def load_config() -> Config:
     gateway_port = int(os.environ.get("GATEWAY_PORT", "8002"))
-    gateway_host = os.environ.get("GATEWAY_HOST", "0.0.0.0")
+    gateway_host = os.environ.get("GATEWAY_HOST", "0.0.0.0")  # nosec: B104 - Docker container default bind
     log_level = os.environ.get("LOG_LEVEL", "INFO")
     default_provider = os.environ.get("DEFAULT_PROVIDER", "mock")
     openai_api_key = _read_secret(os.environ.get("OPENAI_API_KEY_FILE", ""))

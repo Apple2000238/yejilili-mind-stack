@@ -34,17 +34,17 @@ for IMAGE in "${IMAGES[@]}"; do
     fi
 
     # 更新所有 Dockerfile 中的引用
-    for dockerfile in $(find . -name Dockerfile -not -path './.git/*'); do
+    while IFS= read -r -d '' dockerfile; do
         if grep -q "FROM $IMAGE@sha256:" "$dockerfile"; then
             sed -i "s|FROM $IMAGE@sha256:[a-f0-9]*|FROM $IMAGE@$DIGEST|" "$dockerfile"
             echo "  ✓ updated $dockerfile"
             UPDATED=1
         fi
-    done
+    done < <(find . -name Dockerfile -not -path './.git/*' -print0)
 
     # 更新 THIRD_PARTY_MANIFEST.json
     if [[ -f "$MANIFEST" ]]; then
-        KEY=$(echo "$IMAGE" | sed 's/:/\:/')
+        KEY="${IMAGE/:/\:}"
         if command -v jq &>/dev/null; then
             tmp=$(mktemp)
             jq --arg key "$IMAGE" --arg digest "$DIGEST" \

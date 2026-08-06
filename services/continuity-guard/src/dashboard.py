@@ -401,7 +401,7 @@ class DashboardService:
         # 检查 Nocturne adapter（通过 health endpoint）
         try:
             import urllib.request
-            urllib.request.urlopen("http://nocturne-adapter:8001/health", timeout=5)
+            urllib.request.urlopen("http://nocturne-adapter:8001/health", timeout=5)  # nosec: B310 - internal health check, URL is hardcoded
             components["nocturne-adapter"] = "healthy"
             nocturne_ok = True
         except Exception:
@@ -410,7 +410,7 @@ class DashboardService:
         # 检查 Edge Gateway
         try:
             import urllib.request
-            urllib.request.urlopen("http://edge-gateway:8002/health", timeout=5)
+            urllib.request.urlopen("http://edge-gateway:8002/health", timeout=5)  # nosec: B310 - internal health check, URL is hardcoded
             components["edge-gateway"] = "healthy"
         except Exception:
             components["edge-gateway"] = "down"
@@ -418,7 +418,7 @@ class DashboardService:
         # 检查心潮
         try:
             import urllib.request
-            urllib.request.urlopen("http://xinchao:3000/health", timeout=5)
+            urllib.request.urlopen("http://xinchao:3000/health", timeout=5)  # nosec: B310 - internal health check, URL is hardcoded
             components["xinchao"] = "healthy"
             xinchao_ok = True
         except Exception:

@@ -63,7 +63,7 @@ trap 'rm -rf "$STAGING_DIR"' EXIT
 echo "{\"phase\":\"backup\",\"run_id\":\"$RUN_ID\",\"action\":\"collecting\"}" >&2
 
 # 复制 run 目录内容
-rsync -a "$RUN_DIR/" "$STAGING_DIR/" 2>/dev/null || cp -r "$RUN_DIR/"* "$STAGING_DIR/" 2>/dev/null || true
+rsync -a "$RUN_DIR/" "$STAGING_DIR/" 2>/dev/null || find "$RUN_DIR" -mindepth 1 -maxdepth 1 -exec cp -r {} "$STAGING_DIR/" \; 2>/dev/null || true
 
 # 如存在全局日志也纳入
 if [[ -f "$ARTIFACT_DIR/run-index.jsonl" ]]; then

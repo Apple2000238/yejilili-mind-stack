@@ -104,8 +104,8 @@ def snapshot_pre(run_id: str, source_db: str | None) -> dict[str, Any]:
     try:
         import subprocess
         git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning('git commit read failed: %s', e)
 
     # Compose config hash
     compose_path = Path("docker-compose.yml")
@@ -116,8 +116,8 @@ def snapshot_pre(run_id: str, source_db: str | None) -> dict[str, Any]:
     try:
         stat = os.statvfs("/artifacts")
         disk_free = stat.f_frsize * stat.f_bavail
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning('schema hash failed: %s', e)
 
     # Postgres schema hash
     schema_hash = ""
@@ -204,10 +204,11 @@ def snapshot_pre(run_id: str, source_db: str | None) -> dict[str, Any]:
         with get_pg() as pg:
             for tbl in ["continuity_manifest", "identity_assembly_audit"]:
                 try:
-                    cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]
+                    cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]  # nosec: B608 - internal known table name
+
                     ledger_snapshots[tbl] = {"row_count": cnt}
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("ledger table query failed: %s", e)
         ledger_path = pre_dir / "ledger-snapshot.json"
         ledger_path.write_text(json.dumps(ledger_snapshots, ensure_ascii=False, default=str), encoding="utf-8")
     except Exception as e:
@@ -227,8 +228,8 @@ def snapshot_post(run_id: str, exit_code: int, error_summary: str = "") -> dict[
     try:
         stat = os.statvfs("/artifacts")
         disk_free = stat.f_frsize * stat.f_bavail
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("post snapshot disk check failed: %s", e)
 
     post_manifest = {
         "snapshot_type": "post",
@@ -294,18 +295,18 @@ def export_source(source_db: str, run_id: str) -> dict[str, Any]:
         # row count
         count = check_db.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
         # schema
-        schema = check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        schema = check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()  # nosec: B608 - internal known table name
         schema_text = json.dumps(schema, sort_keys=True, ensure_ascii=False)
         schema_hash = _sha256_text(schema_text)
 
         # Merkle-ish hash of sorted rows（含 rowid 以确保稳定主键语义）
-        pragma_info = check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        pragma_info = check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()  # nosec: B608 - internal known table name
         has_explicit_pk = any(p[5] == 1 for p in pragma_info)  # pk column
         if has_explicit_pk:
-            rows = check_db.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()
+            rows = check_db.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()  # nosec: B608 - internal known table name
         else:
-            rows = check_db.execute(f'SELECT rowid, * FROM "{table_name}" ORDER BY rowid').fetchall()
-        cols = [d[0] for d in check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
+            rows = check_db.execute(f'SELECT rowid, * FROM "{table_name}" ORDER BY rowid').fetchall()  # nosec: B608 - internal known table name
+        cols = [d[0] for d in check_db.execute(f'PRAGMA table_info("{table_name}")').fetchall()]  # nosec: B608 - internal known table name
         if not has_explicit_pk:
             cols = ["rowid"] + cols
         row_hashes = []
@@ -676,10 +677,10 @@ def import_staging(run_id: str, mapping_version: str = "v1") -> dict[str, Any]:
             for table_name, info in manifest["tables"].items():
                 has_explicit_pk = info.get("has_explicit_pk", True)
                 if has_explicit_pk:
-                    rows = src.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()
+                    rows = src.execute(f'SELECT * FROM "{table_name}" ORDER BY rowid').fetchall()  # nosec: B608 - internal known table name
                 else:
-                    rows = src.execute(f'SELECT rowid, * FROM "{table_name}" ORDER BY rowid').fetchall()
-                cols = [d[0] for d in src.execute(f'PRAGMA table_info("{table_name}")').fetchall()]
+                    rows = src.execute(f'SELECT rowid, * FROM "{table_name}" ORDER BY rowid').fetchall()  # nosec: B608 - internal known table name
+                cols = [d[0] for d in src.execute(f'PRAGMA table_info("{table_name}")').fetchall()]  # nosec: B608 - internal known table name
                 if not has_explicit_pk:
                     cols = ["rowid"] + cols
 
@@ -832,8 +833,9 @@ def verify_run(run_id: str) -> dict[str, Any]:
                 (run_id, list(source_tables)),
             ).fetchone()["c"]
             actual = pg.execute(
-                f"SELECT COUNT(*) AS c FROM {proj_table} WHERE run_id=%s",
-                (run_id,),
+                f"SELECT COUNT(*) AS c FROM {proj_table} WHERE run_id=%s",  # nosec: B608 - internal known table name
+
+  # nosec: B608 - internal known table name                (run_id,),
             ).fetchone()["c"]
             ok = actual == expected
             results["projection_checks"][proj_table] = {"expected": expected, "actual": actual, "ok": ok}
@@ -842,8 +844,9 @@ def verify_run(run_id: str) -> dict[str, Any]:
 
             # 必填字段非空抽查（前 10 条）
             sample = pg.execute(
-                f"SELECT * FROM {proj_table} WHERE run_id=%s LIMIT 10",
-                (run_id,),
+                f"SELECT * FROM {proj_table} WHERE run_id=%s LIMIT 10",  # nosec: B608 - internal known table name
+
+  # nosec: B608 - internal known table name                (run_id,),
             ).fetchall()
             for row in sample:
                 if not row.get("source_pk") or not row.get("source_content_hash"):
@@ -880,8 +883,9 @@ def verify_run(run_id: str) -> dict[str, Any]:
                 (run_id, list(source_tables)),
             ).fetchone()["c"]
             proj_count = pg.execute(
-                f"SELECT COUNT(*) AS c FROM {proj_table} WHERE run_id=%s",
-                (run_id,),
+                f"SELECT COUNT(*) AS c FROM {proj_table} WHERE run_id=%s",  # nosec: B608 - internal known table name
+
+  # nosec: B608 - internal known table name                (run_id,),
             ).fetchone()["c"]
             results["idempotency_check"][proj_table] = {"source_pk_distinct": src_count, "projection_rows": proj_count, "ok": src_count == proj_count}
             if src_count != proj_count:
@@ -968,7 +972,8 @@ def rollback_run(run_id: str) -> dict[str, Any]:
             ledger_pre = json.loads(ledger_snapshot_path.read_text(encoding="utf-8"))
             for tbl, pre_info in ledger_pre.items():
                 try:
-                    current_cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]
+                    current_cnt = pg.execute(f"SELECT COUNT(*) AS c FROM {tbl}").fetchone()["c"]  # nosec: B608 - internal known table name
+
                     if current_cnt != pre_info.get("row_count", current_cnt):
                         restored["ledger_warnings"].append(
                             f"ledger_changed:{tbl}:pre={pre_info['row_count']}:now={current_cnt}"

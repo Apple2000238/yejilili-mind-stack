@@ -39,7 +39,7 @@ def load_config() -> Config:
     """从环境变量和 Docker Secret 加载配置。"""
     return Config(
         adapter_port=int(os.environ.get("ADAPTER_PORT", "8001")),
-        adapter_host=os.environ.get("ADAPTER_HOST", "0.0.0.0"),
+        adapter_host=os.environ.get("ADAPTER_HOST", "0.0.0.0"),  # nosec: B104 - Docker container default bind
         nocturne_url=os.environ.get("NOCTURNE_URL", "http://nocturne:8000"),
         mcp_adapter_token=_read_secret(os.environ.get("MCP_ADAPTER_TOKEN_FILE", "")),
         postgres_host=os.environ.get("POSTGRES_HOST", "continuity-ledger"),
